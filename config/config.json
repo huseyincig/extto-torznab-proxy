@@ -1,0 +1,19 @@
+{
+  "baseUrl": "https://ext.to",
+  "publicUrl": "",
+  "flaresolverrUrl": "http://flaresolverr:8191/v1",
+  "sessionName": "extto_persistent",
+  "apiKey": "6e0a481e46a3598278a9377ced45682a2d4e",
+  "withAdult": true,
+  "warmEnabled": true,
+  "warmQuery": "warm",
+  "warmIntervalMinutes": 10,
+  "coldThresholdSeconds": 30,
+  "requestTimeoutMs": 120000,
+  "idleTimeoutMinutes": 360,
+  "searchTtlSeconds": 180,
+  "magnetTtlMinutes": 1440,
+  "maxSearchCacheItems": 100,
+  "maxMagnetCacheItems": 1000,
+  "stripSeasonFromSearch": true
+}

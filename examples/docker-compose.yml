@@ -1,0 +1,28 @@
+services:
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - TZ=Europe/Istanbul
+    shm_size: "1gb"
+    restart: unless-stopped
+
+  extto-torznab-proxy:
+    image: extto-torznab-proxy:latest
+    container_name: extto-torznab-proxy
+    depends_on:
+      - flaresolverr
+    environment:
+      - TZ=Europe/Istanbul
+      - PORT=8998
+      - CONFIG_DIR=/config
+    ports:
+      - "8998:8998"
+    volumes:
+      - ./config:/config
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
