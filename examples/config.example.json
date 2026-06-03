@@ -1,9 +1,9 @@
 {
   "baseUrl": "https://ext.to",
-  "publicUrl": "",
+  "publicUrl": "http://YOUR_HOST_IP:8998",
   "flaresolverrUrl": "http://flaresolverr:8191/v1",
   "sessionName": "extto_persistent",
-  "apiKey": "6e0a481e46a3598278a9377ced45682a2d4e",
+  "apiKey": "change-me",
   "withAdult": true,
   "warmEnabled": true,
   "warmQuery": "warm",
@@ -15,5 +15,6 @@
   "magnetTtlMinutes": 1440,
   "maxSearchCacheItems": 100,
   "maxMagnetCacheItems": 1000,
+  "prefetchFirstMagnets": 0,
   "stripSeasonFromSearch": true
 }

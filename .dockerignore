@@ -1,6 +1,9 @@
 config
 node_modules
 .git
+.github
 *.log
 tmp
 .env
+.DS_Store
+Thumbs.db
