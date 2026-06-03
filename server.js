@@ -1035,6 +1035,11 @@ function settingsHtml(message = "") {
 
   const publicUrlValue = c.publicUrl || "";
   const apiKey = c.apiKey || "";
+  const currentWarmSeconds = getCurrentWarmSeconds();
+  const currentWarmState = getCurrentWarmState();
+  const lastWarmAgeSeconds = lastWarm && lastWarm.ok && lastWarm.at
+    ? Math.max(0, Math.floor((Date.now() - new Date(lastWarm.at).getTime()) / 1000))
+    : null;
 
   return `<!doctype html>
 <html lang="en">
@@ -1423,6 +1428,51 @@ function settingsHtml(message = "") {
       background: rgba(220,38,38,.98);
     }
 
+    .confirm-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: rgba(2, 6, 23, .72);
+      backdrop-filter: blur(8px);
+    }
+
+    .confirm-overlay[hidden] {
+      display: none;
+    }
+
+    .confirm-box {
+      width: min(560px, 100%);
+      border: 1px solid var(--border-strong);
+      border-radius: 18px;
+      background: #111827;
+      box-shadow: var(--shadow);
+      padding: 20px;
+    }
+
+    .confirm-box h3 {
+      margin: 0 0 10px;
+      font-size: 20px;
+      letter-spacing: -0.02em;
+    }
+
+    .confirm-box p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+      font-size: 14px;
+    }
+
+    .confirm-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
     .check-row {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -1548,8 +1598,8 @@ function settingsHtml(message = "") {
       <h1>EXT Torznab Proxy</h1>
       <p class="subtitle" data-i18n="subtitle">A self-hosted Torznab gateway for EXT results with FlareSolverr session handling, warm checks, cache and magnet resolving.</p>
       <div class="badge-row">
-        <span class="badge"><span id="sessionDot" class="dot ${sessionReady ? "" : "off"}"></span><span id="sessionStatus"><span data-i18n="session"></span>: ${sessionReady ? "Ready" : "Cold"}</span></span>
-        <span class="badge"><span id="warmDot" class="dot ${currentWarm ? "warn" : (config.warmEnabled ? "" : "off")}"></span><span id="warmStatus"><span data-i18n="warm"></span>: ${htmlEscape(getWarmBadgeText())}</span></span>
+        <span class="badge"><span id="sessionDot" class="dot ${sessionReady ? "" : "off"}"></span><span id="sessionStatus">Session: ${sessionReady ? "Ready" : "Cold"}</span></span>
+        <span class="badge"><span id="warmDot" class="dot ${currentWarm ? "warn" : (config.warmEnabled ? "" : "off")}"></span><span id="warmStatus">Warm: ${htmlEscape(getWarmBadgeText())}</span></span>
         <span class="badge"><span id="fsDot" class="dot ${fsBusy ? "warn" : ""}"></span><span id="fsStatus">FlareSolverr: ${fsBusy ? "Busy" : "Idle"}</span></span>
       </div>
     </div>
@@ -1557,21 +1607,21 @@ function settingsHtml(message = "") {
     <div class="quick-card">
       <div class="quick-title">
         <h2 data-i18n="prowlarrInfo">Prowlarr Generic Torznab</h2>
-        <a class="btn small secondary" href="/api?t=caps" target="_blank">Caps</a>
+        <a class="btn small secondary" href="/api?t=caps" target="_blank" data-i18n="caps">Caps</a>
       </div>
       <div class="copy-grid">
         <div class="copy-line">
-          <div class="copy-label">URL</div>
+          <div class="copy-label" data-i18n="quickUrl">URL</div>
           <code id="torznabUrl">${htmlEscape(publicUrlValue)}</code>
           <button type="button" class="btn small ghost" data-copy="torznabUrl" data-i18n="copy">Copy</button>
         </div>
         <div class="copy-line">
-          <div class="copy-label">API Path</div>
+          <div class="copy-label" data-i18n="quickApiPath">API Path</div>
           <code id="apiPath">/api</code>
           <button type="button" class="btn small ghost" data-copy="apiPath" data-i18n="copy">Copy</button>
         </div>
         <div class="copy-line">
-          <div class="copy-label">API Key</div>
+          <div class="copy-label" data-i18n="quickApiKey">API Key</div>
           <code id="apiKey">${htmlEscape(apiKey)}</code>
           <button type="button" class="btn small ghost" data-copy="apiKey" data-i18n="copy">Copy</button>
         </div>
@@ -1615,7 +1665,7 @@ function settingsHtml(message = "") {
         </div>
 
         <div class="field">
-          <label>FlareSolverr URL</label>
+          <label data-i18n="flaresolverrUrl">FlareSolverr URL</label>
           <input type="text" name="flaresolverrUrl" value="${htmlEscape(c.flaresolverrUrl)}">
           <div class="hint" data-i18n="fsHint">Usually http://flaresolverr:8191/v1 when both containers share a Docker network.</div>
         </div>
@@ -1627,7 +1677,7 @@ function settingsHtml(message = "") {
         </div>
 
         <div class="field">
-          <label>API Key</label>
+          <label data-i18n="apiKeyLabel">API Key</label>
           <div class="api-key-row">
             <input id="apiKeyInput" type="text" name="apiKey" value="${htmlEscape(c.apiKey)}" autocomplete="off" spellcheck="false">
             <button class="icon-btn" type="button" onclick="copyApiKeyFromInput(this)" title="Copy API Key" data-i18n-title="copyApiKey" aria-label="Copy API Key">⧉</button>
@@ -1744,59 +1794,92 @@ function settingsHtml(message = "") {
   <p class="footer-note" data-i18n="footer">EXT Torznab Proxy runs locally. Keep this page inside your trusted network.</p>
 </div>
 
+<div id="apiKeyConfirmOverlay" class="confirm-overlay" hidden>
+  <div class="confirm-box" role="dialog" aria-modal="true" aria-labelledby="apiKeyConfirmTitle">
+    <h3 id="apiKeyConfirmTitle" data-i18n="apiKeyRotateTitle">Generate new API key?</h3>
+    <p data-i18n="apiKeyRotateConfirm">A new API key will be written immediately. You must update the API Key field in Prowlarr after this change. Continue?</p>
+    <div class="confirm-actions">
+      <button class="btn secondary" type="button" id="apiKeyConfirmCancel" data-i18n="cancel">Cancel</button>
+      <button class="btn" type="button" id="apiKeyConfirmOk" data-i18n="ok">OK</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (function () {
   var tr = {
     subtitle: "FlareSolverr oturumu, sıcak tutma, cache ve magnet çözme desteği olan EXT için bağımsız Torznab geçidi.",
     session: "Oturum",
     warm: "Warm",
+    ready: "Hazır",
+    cold: "Soğuk",
+    on: "Açık",
+    off: "Kapalı",
+    busy: "Meşgul",
+    idle: "Boşta",
+    runningState: "ÇALIŞIYOR",
+    challengeState: "CHALLENGE",
+    warmState: "WARM",
+    coldChallengeState: "COLD/CHALLENGE",
+    errorState: "HATA",
     prowlarrInfo: "Prowlarr Generic Torznab Bilgileri",
+    caps: "Caps",
     copy: "Kopyala",
-    searchCache: "Arama Cache",
-    magnetCache: "Magnet Cache",
-    idleSeconds: "Boşta Saniye",
+    quickUrl: "URL",
+    quickApiPath: "API Yolu",
+    quickApiKey: "API Anahtarı",
+    searchCache: "Arama Önbelleği",
+    magnetCache: "Magnet Önbelleği",
+    idleSeconds: "Boşta Süresi",
+    warmAge: "Warm Süresi",
+    lastWarmRun: "Son Warm / Challenge",
     lastWarm: "Son Warm",
     siteAndFs: "Site ve FlareSolverr",
     siteAndFsDesc: "Ana site adresi, FlareSolverr bağlantısı, session adı ve API kimliği.",
-    baseUrl: "Base URL",
+    baseUrl: "Site Adresi",
     baseUrlHint: "Proxy'nin içeride kullandığı hedef EXT site adresi.",
-    publicUrl: "Public URL",
+    publicUrl: "Dış Erişim Adresi",
     publicUrlHint: "Prowlarr'ın erişeceği adres. Boş bırakılırsa bu sayfanın adresi gösterilir.",
     fsHint: "İki container aynı Docker ağındaysa genelde http://flaresolverr:8191/v1 olur.",
-    sessionName: "Session Adı",
+    sessionName: "Oturum Adı",
     sessionNameHint: "Kalıcı FlareSolverr tarayıcı oturumu adı.",
+    flaresolverrUrl: "FlareSolverr Adresi",
+    apiKeyLabel: "API Anahtarı",
     apiKeyHint: "Prowlarr Generic Torznab tarafından kullanılır.",
     copyApiKey: "API anahtarını kopyala",
     generateApiKey: "Yeni API anahtarı üret",
     apiKeyCopied: "API anahtarı kopyalandı",
     apiKeyCopyFailed: "API anahtarı kopyalanamadı",
-    apiKeyGenerated: "Yeni API anahtarı üretildi ve kopyalandı. Ayarları kaydettikten sonra Prowlarr API Key alanını da güncelleyin.",
-    apiKeyRotateConfirm: "Yeni API anahtarı üretilecek. Ayarları kaydettikten sonra Prowlarr içindeki API Key alanını da bu yeni anahtarla değiştirmeniz gerekir. Devam edilsin mi?",
-    requestTimeout: "İstek Zaman Aşımı Ms",
+    apiKeyGenerated: "Yeni API anahtarı oluşturuldu, ayar dosyasına yazıldı ve panoya kopyalandı. Prowlarr içindeki API Key alanını da bu yeni anahtarla güncellemeyi unutmayın.",
+    apiKeyRotateTitle: "Yeni API anahtarı oluşturulsun mu?",
+    apiKeyRotateConfirm: "Yeni API anahtarı hemen ayar dosyasına yazılacak. Bu işlemden sonra Prowlarr içindeki API Key alanını da yeni anahtarla güncellemeniz gerekir. Devam edilsin mi?",
+    ok: "Tamam",
+    cancel: "İptal",
+    requestTimeout: "İstek Zaman Aşımı (ms)",
     requestTimeoutHint: "Cloudflare challenge süresinden yüksek olmalı.",
     withAdult: "Adult sonuçları dahil et",
     withAdultHint: "Browse isteklerine with_adult=1 ekler.",
     stripSeason: "Sezon/bölüm kalıplarını temizle",
     stripSeasonHint: "Aramalardan S01E01, S01 ve Season 1 gibi kalıpları temizler.",
-    warmCache: "Warm ve Cache",
+    warmCache: "Warm ve Önbellek",
     warmCacheDesc: "Cloudflare oturumunu sıcak tutar ve tekrar eden site isteklerini azaltır.",
     warmQuery: "Warm Arama Kelimesi",
-    warmInterval: "Warm Aralığı Dakika",
-    coldThreshold: "Cold Eşiği Saniye",
-    searchTtl: "Arama Cache Süresi Saniye",
-    magnetTtl: "Magnet Cache Süresi Dakika",
-    idleTimeout: "Boşta Oturum Kapatma Dakika",
-    maxSearch: "Maksimum Arama Cache Adedi",
-    maxMagnet: "Maksimum Magnet Cache Adedi",
+    warmInterval: "Warm Aralığı (dakika)",
+    coldThreshold: "Cold Eşiği (saniye)",
+    searchTtl: "Arama Önbellek Süresi (saniye)",
+    magnetTtl: "Magnet Önbellek Süresi (dakika)",
+    idleTimeout: "Boşta Oturum Kapatma (dakika)",
+    maxSearch: "Maksimum Arama Önbellek Adedi",
+    maxMagnet: "Maksimum Magnet Önbellek Adedi",
     warmEnabled: "Dahili warm zamanlayıcısını aç",
     warmEnabledHint: "Container belirli aralıklarla kendi içinde /warm çağırır. Bu container için harici cron gerekmez.",
     manualWarm: "Manuel Warm",
-    clearCache: "Cache Temizle",
+    clearCache: "Önbelleği Temizle",
     autoRefresh: "Otomatik yenile",
     secondsShort: "sn",
     running: "Çalışıyor...",
     warmOk: "Warm tamamlandı",
-    cacheClearOk: "Cache temizlendi",
+    cacheClearOk: "Önbellek temizlendi",
     sessionReset: "Session Reset",
     sessionResetOk: "Session sıfırlandı",
     actionFailed: "İşlem başarısız",
@@ -1808,11 +1891,28 @@ function settingsHtml(message = "") {
     subtitle: "A self-hosted Torznab gateway for EXT results with FlareSolverr session handling, warm checks, cache and magnet resolving.",
     session: "Session",
     warm: "Warm",
+    ready: "Ready",
+    cold: "Cold",
+    on: "On",
+    off: "Off",
+    busy: "Busy",
+    idle: "Idle",
+    runningState: "RUNNING",
+    challengeState: "CHALLENGE",
+    warmState: "WARM",
+    coldChallengeState: "COLD/CHALLENGE",
+    errorState: "ERROR",
     prowlarrInfo: "Prowlarr Generic Torznab",
+    caps: "Caps",
     copy: "Copy",
+    quickUrl: "URL",
+    quickApiPath: "API Path",
+    quickApiKey: "API Key",
     searchCache: "Search Cache",
     magnetCache: "Magnet Cache",
     idleSeconds: "Idle Seconds",
+    warmAge: "Warm Age",
+    lastWarmRun: "Last Warm / Challenge",
     lastWarm: "Last Warm",
     siteAndFs: "Site and FlareSolverr",
     siteAndFsDesc: "Main site URL, FlareSolverr endpoint, session name and API identity.",
@@ -1823,14 +1923,19 @@ function settingsHtml(message = "") {
     fsHint: "Usually http://flaresolverr:8191/v1 when both containers share a Docker network.",
     sessionName: "Session Name",
     sessionNameHint: "Persistent FlareSolverr browser session name.",
+    flaresolverrUrl: "FlareSolverr URL",
+    apiKeyLabel: "API Key",
     apiKeyHint: "Used by Prowlarr Generic Torznab.",
     copyApiKey: "Copy API key",
     generateApiKey: "Generate new API key",
     apiKeyCopied: "API key copied",
     apiKeyCopyFailed: "API key copy failed",
-    apiKeyGenerated: "New API key generated and copied. After saving, update the API Key field in Prowlarr too.",
-    apiKeyRotateConfirm: "A new API key will be generated. After saving settings, you must update the API Key field in Prowlarr with this new key. Continue?",
-    requestTimeout: "Request Timeout Ms",
+    apiKeyGenerated: "New API key was generated, saved to the config file, and copied to the clipboard. Do not forget to update the API Key field in Prowlarr too.",
+    apiKeyRotateTitle: "Generate a new API key?",
+    apiKeyRotateConfirm: "A new API key will be written to the config file immediately. After this change, you must update the API Key field in Prowlarr with the new key. Continue?",
+    ok: "OK",
+    cancel: "Cancel",
+    requestTimeout: "Request Timeout (ms)",
     requestTimeoutHint: "Must be higher than Cloudflare challenge duration.",
     withAdult: "Include adult results",
     withAdultHint: "Adds with_adult=1 to browse requests.",
@@ -1839,11 +1944,11 @@ function settingsHtml(message = "") {
     warmCache: "Warm and Cache",
     warmCacheDesc: "Keeps the Cloudflare session warm and limits repeated site requests.",
     warmQuery: "Warm Query",
-    warmInterval: "Warm Interval Minutes",
-    coldThreshold: "Cold Threshold Seconds",
-    searchTtl: "Search TTL Seconds",
-    magnetTtl: "Magnet TTL Minutes",
-    idleTimeout: "Idle Timeout Minutes",
+    warmInterval: "Warm Interval (minutes)",
+    coldThreshold: "Cold Threshold (seconds)",
+    searchTtl: "Search TTL (seconds)",
+    magnetTtl: "Magnet TTL (minutes)",
+    idleTimeout: "Idle Timeout (minutes)",
     maxSearch: "Max Search Cache Items",
     maxMagnet: "Max Magnet Cache Items",
     warmEnabled: "Enable internal warm timer",
@@ -1871,6 +1976,18 @@ function settingsHtml(message = "") {
 
   document.documentElement.lang = lang.indexOf("tr") === 0 ? "tr" : "en";
 
+  var initialStatus = {
+    sessionReady: ${sessionReady ? "true" : "false"},
+    fsBusy: ${fsBusy ? "true" : "false"},
+    warmEnabled: ${config.warmEnabled ? "true" : "false"},
+    currentWarmSeconds: ${currentWarmSeconds === null ? "null" : String(currentWarmSeconds)},
+    currentWarmState: ${JSON.stringify(currentWarmState)},
+    warmAgeSeconds: ${lastWarmAgeSeconds === null ? "null" : String(lastWarmAgeSeconds)},
+    lastWarmDurationSeconds: ${lastWarm ? Number(lastWarm.durationSeconds || 0) : "null"},
+    lastWarmDurationMs: ${lastWarm ? Number(lastWarm.durationMs || 0) : "null"},
+    lastWarmState: ${JSON.stringify(lastWarm ? lastWarm.state : null)}
+  };
+
   document.querySelectorAll("[data-i18n]").forEach(function (el) {
     var key = el.getAttribute("data-i18n");
     el.textContent = dict[key] || en[key] || el.textContent;
@@ -1881,6 +1998,51 @@ function settingsHtml(message = "") {
     el.title = dict[key] || en[key] || el.title;
     el.setAttribute("aria-label", el.title);
   });
+
+  function stateText(state) {
+    if (state === "WARM") return dict.warmState || "WARM";
+    if (state === "COLD_OR_CHALLENGE") return dict.coldChallengeState || "COLD/CHALLENGE";
+    if (state === "ERROR") return dict.errorState || "ERROR";
+    if (state === "RUNNING") return dict.runningState || "RUNNING";
+    if (state === "CHALLENGE") return dict.challengeState || "CHALLENGE";
+    return state || "—";
+  }
+
+  function durationText(seconds, ms) {
+    seconds = Number(seconds || 0);
+    ms = Number(ms || 0);
+    if (seconds < 1 && ms > 0) return ms + "ms";
+    return seconds + "s";
+  }
+
+  function setText(id, value) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = value;
+  }
+
+  function applyInitialStatus() {
+    setText("sessionStatus", (dict.session || "Session") + ": " + (initialStatus.sessionReady ? (dict.ready || "Ready") : (dict.cold || "Cold")));
+
+    if (initialStatus.currentWarmSeconds !== null) {
+      var warmRunState = initialStatus.currentWarmState === "CHALLENGE" ? (dict.challengeState || "CHALLENGE") : (dict.runningState || "RUNNING");
+      setText("warmStatus", (dict.warm || "Warm") + ": " + warmRunState + " " + initialStatus.currentWarmSeconds + "s");
+    } else {
+      setText("warmStatus", (dict.warm || "Warm") + ": " + (initialStatus.warmEnabled ? (dict.on || "On") : (dict.off || "Off")));
+    }
+
+    setText("fsStatus", "FlareSolverr: " + (initialStatus.fsBusy ? (dict.busy || "Busy") : (dict.idle || "Idle")));
+
+    if (initialStatus.currentWarmSeconds !== null) {
+      var currentStateText = initialStatus.currentWarmState === "CHALLENGE" ? (dict.challengeState || "CHALLENGE") : (dict.runningState || "RUNNING");
+      setText("warmAgeVal", initialStatus.currentWarmSeconds + "s " + currentStateText);
+      setText("lastWarmRunVal", initialStatus.currentWarmSeconds + "s " + currentStateText);
+    } else {
+      setText("warmAgeVal", initialStatus.warmAgeSeconds === null ? "—" : initialStatus.warmAgeSeconds + "s " + (dict.warmState || "WARM"));
+      setText("lastWarmRunVal", initialStatus.lastWarmState ? durationText(initialStatus.lastWarmDurationSeconds, initialStatus.lastWarmDurationMs) + " " + stateText(initialStatus.lastWarmState) : "—");
+    }
+  }
+
+  applyInitialStatus();
 
   var torznabUrl = document.getElementById("torznabUrl");
   if (torznabUrl && !torznabUrl.textContent.trim()) {
@@ -1968,8 +2130,10 @@ function settingsHtml(message = "") {
     }
   }
 
-  async function callJson(url) {
-    var r = await fetch(url, { cache: "no-store" });
+  async function callJson(url, options) {
+    options = options || {};
+    options.cache = "no-store";
+    var r = await fetch(url, options);
     var text = await r.text();
     var json = null;
     try { json = JSON.parse(text); } catch (_) {}
@@ -1979,23 +2143,44 @@ function settingsHtml(message = "") {
     return json || { ok: true, text: text };
   }
 
-  function generateHexApiKey(byteCount) {
-    byteCount = byteCount || 20;
+  function showApiKeyConfirm() {
+    var overlay = document.getElementById("apiKeyConfirmOverlay");
+    var okBtn = document.getElementById("apiKeyConfirmOk");
+    var cancelBtn = document.getElementById("apiKeyConfirmCancel");
 
-    if (window.crypto && window.crypto.getRandomValues) {
-      var bytes = new Uint8Array(byteCount);
-      window.crypto.getRandomValues(bytes);
-      return Array.prototype.map.call(bytes, function (b) {
-        return b.toString(16).padStart(2, "0");
-      }).join("");
+    if (!overlay || !okBtn || !cancelBtn) {
+      return Promise.resolve(window.confirm(dict.apiKeyRotateConfirm || "Generate new API key?"));
     }
 
-    var out = "";
-    var chars = "0123456789abcdef";
-    for (var i = 0; i < byteCount * 2; i++) {
-      out += chars[Math.floor(Math.random() * chars.length)];
+    if (refreshTimer) {
+      clearTimeout(refreshTimer);
+      refreshTimer = null;
     }
-    return out;
+
+    overlay.hidden = false;
+    okBtn.focus();
+
+    return new Promise(function (resolve) {
+      function close(value) {
+        overlay.hidden = true;
+        okBtn.removeEventListener("click", onOk);
+        cancelBtn.removeEventListener("click", onCancel);
+        overlay.removeEventListener("click", onOverlay);
+        document.removeEventListener("keydown", onKey);
+        armRefresh();
+        resolve(value);
+      }
+
+      function onOk() { close(true); }
+      function onCancel() { close(false); }
+      function onOverlay(e) { if (e.target === overlay) close(false); }
+      function onKey(e) { if (e.key === "Escape") close(false); }
+
+      okBtn.addEventListener("click", onOk);
+      cancelBtn.addEventListener("click", onCancel);
+      overlay.addEventListener("click", onOverlay);
+      document.addEventListener("keydown", onKey);
+    });
   }
 
   window.copyApiKeyFromInput = async function () {
@@ -2011,24 +2196,35 @@ function settingsHtml(message = "") {
     }
   };
 
-  window.regenerateApiKey = async function () {
+  window.regenerateApiKey = async function (btn) {
     var input = document.getElementById("apiKeyInput");
     if (!input) return;
 
-    var msg = dict.apiKeyRotateConfirm || "A new API key will be generated. Continue?";
-    if (!window.confirm(msg)) return;
+    var confirmed = await showApiKeyConfirm();
+    if (!confirmed) return;
 
-    var newKey = generateHexApiKey(20);
-    input.value = newKey;
-    input.focus();
-    input.select();
+    try {
+      setBusy(btn, true);
+      showToast(dict.running || "Running...", "");
 
-    var ok = await copyText(newKey);
+      var j = await callJson("/api-key/regenerate", { method: "POST" });
+      if (!j || !j.apiKey) throw new Error("No API key returned");
 
-    if (ok) {
-      showToast(dict.apiKeyGenerated || "New API key generated and copied.", "ok");
-    } else {
-      showToast((dict.apiKeyGenerated || "New API key generated.") + " " + (dict.apiKeyCopyFailed || "Copy failed."), "err");
+      input.value = j.apiKey;
+      var quickApiKey = document.getElementById("apiKey");
+      if (quickApiKey) quickApiKey.textContent = j.apiKey;
+
+      var ok = await copyText(j.apiKey);
+
+      if (ok) {
+        showToast(dict.apiKeyGenerated || "New API key generated and copied.", "ok");
+      } else {
+        showToast((dict.apiKeyGenerated || "New API key generated.") + " " + (dict.apiKeyCopyFailed || "Copy failed."), "err");
+      }
+    } catch (e) {
+      showToast((dict.actionFailed || "Action failed") + ": " + e.message, "err");
+    } finally {
+      setBusy(btn, false);
     }
   };
 
@@ -2266,6 +2462,12 @@ http.createServer(async (req, res) => {
     if (req.method === "GET" && u.pathname === "/warm") {
       const result = await doWarm();
       return send(res, result.ok ? 200 : 500, "application/json; charset=utf-8", JSON.stringify(result, null, 2));
+    }
+
+    if (req.method === "POST" && u.pathname === "/api-key/regenerate") {
+      const nextApiKey = randomApiKey();
+      saveConfig({ ...config, apiKey: nextApiKey });
+      return send(res, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true, apiKey: nextApiKey }, null, 2));
     }
 
     if (req.method === "GET" && u.pathname === "/cache/clear") {
