@@ -8,7 +8,7 @@ services:
     restart: unless-stopped
 
   extto-torznab-proxy:
-    image: extto-torznab-proxy:latest
+    image: ghcr.io/huseyincig/extto-torznab-proxy:latest
     container_name: extto-torznab-proxy
     depends_on:
       - flaresolverr
@@ -20,6 +20,12 @@ services:
       - "8998:8998"
     volumes:
       - ./config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8998/health >/dev/null || exit 1"]
+      interval: 120s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
     logging:
       driver: json-file

@@ -14,12 +14,14 @@ It is designed for Prowlarr and uses FlareSolverr internally for Cloudflare/sess
 - Direct magnet resolving from torrent detail pages
 - Web configuration page
 - Turkish/English UI based on browser language
+- Docker healthcheck endpoint
 - Support for alternate base domains:
-  - https://extranet.torrentbay.st
-  - https://ext.to
+  - `https://extranet.torrentbay.st`
+  - `https://ext.to`
 
-## Docker Compose Example
+## Docker Compose
 
+```yaml
 services:
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
@@ -30,7 +32,7 @@ services:
     restart: unless-stopped
 
   extto-torznab-proxy:
-    image: extto-torznab-proxy:latest
+    image: ghcr.io/huseyincig/extto-torznab-proxy:latest
     container_name: extto-torznab-proxy
     depends_on:
       - flaresolverr
@@ -42,18 +44,33 @@ services:
       - "8998:8998"
     volumes:
       - ./config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8998/health >/dev/null || exit 1"]
+      interval: 120s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+```
+
+For a pinned version, use:
+
+```yaml
+image: ghcr.io/huseyincig/extto-torznab-proxy:1.0.0
+```
 
 ## Web UI
 
 Open:
 
+```text
 http://YOUR_HOST_IP:8998/
+```
 
 Configure:
 
@@ -61,36 +78,44 @@ Configure:
 - Public URL
 - FlareSolverr URL
 - API key
-- warm interval
-- cache TTLs
-- session options
+- Warm interval
+- Cache TTLs
+- Session options
 
-## Prowlarr Setup
+The app creates `/config/config.json` automatically on first start. Do not commit that file to a public repository because it contains your API key and local settings.
+
+## Prowlarr setup
 
 In Prowlarr:
 
+```text
 Add Indexer -> Generic Torznab
+```
 
 Use:
 
+```text
 URL: http://YOUR_HOST_IP:8998
 API Path: /api
 API Key: shown on the web UI
 Redirect: disabled
 Tags: optional, for example extto
+```
 
 Do not assign a FlareSolverr indexer proxy tag to this Generic Torznab indexer. This container handles FlareSolverr itself.
 
-## Important Endpoints
+## Important endpoints
 
+```text
 /                 Web UI
-/health           Health JSON
+/health           Health JSON and Docker healthcheck target
 /warm             Manual warm
 /cache/clear      Clear search and magnet cache
 /session/reset    Reset FlareSolverr session
 /api?t=caps       Torznab capabilities
 /api?t=search     Torznab search
 /download         Magnet redirect endpoint
+```
 
 ## Notes
 
@@ -98,3 +123,26 @@ Do not assign a FlareSolverr indexer proxy tag to this Generic Torznab indexer. 
 - Search cache and magnet cache are separate.
 - Magnet resolving is done only when a result is downloaded, unless prefetch is enabled.
 - If you change Base URL, it is recommended to clear cache, reset session, and run warm again.
+- The app image is published as `ghcr.io/huseyincig/extto-torznab-proxy:latest`.
+
+## Build locally
+
+```sh
+docker build -t extto-torznab-proxy:latest .
+```
+
+## Publish
+
+This repository includes a GitHub Actions workflow that publishes multi-arch images to GitHub Container Registry:
+
+```text
+ghcr.io/huseyincig/extto-torznab-proxy:latest
+ghcr.io/huseyincig/extto-torznab-proxy:1.0.0
+```
+
+Push a release tag to publish a versioned image:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
