@@ -15,6 +15,5 @@
   "magnetTtlMinutes": 1440,
   "maxSearchCacheItems": 100,
   "maxMagnetCacheItems": 1000,
-  "prefetchFirstMagnets": 0,
   "stripSeasonFromSearch": true
 }

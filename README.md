@@ -121,7 +121,7 @@ Do not assign a FlareSolverr indexer proxy tag to this Generic Torznab indexer. 
 
 - Warm keeps the Cloudflare session active.
 - Search cache and magnet cache are separate.
-- Magnet resolving is done only when a result is downloaded, unless prefetch is enabled.
+- Magnet resolving is done only when a result is downloaded. Resolved magnets are cached.
 - If you change Base URL, it is recommended to clear cache, reset session, and run warm again.
 - The app image is published as `ghcr.io/huseyincig/extto-torznab-proxy:latest`.
 
