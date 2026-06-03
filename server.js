@@ -1383,6 +1383,46 @@ function settingsHtml(message = "") {
       box-shadow: 0 0 0 4px rgba(59,130,246,.14);
     }
 
+    .api-key-row {
+      display: grid;
+      grid-template-columns: 1fr 46px 46px;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .api-key-row input {
+      min-width: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: .01em;
+    }
+
+    .icon-btn {
+      width: 46px;
+      min-height: 42px;
+      border: 1px solid var(--border-strong);
+      border-radius: 12px;
+      background: rgba(148,163,184,.14);
+      color: var(--text);
+      font-size: 20px;
+      font-weight: 900;
+      cursor: pointer;
+      line-height: 1;
+    }
+
+    .icon-btn:hover {
+      background: rgba(148,163,184,.24);
+    }
+
+    .icon-btn.danger {
+      background: rgba(239,68,68,.88);
+      border-color: rgba(239,68,68,.95);
+      color: white;
+    }
+
+    .icon-btn.danger:hover {
+      background: rgba(220,38,38,.98);
+    }
+
     .check-row {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -1496,6 +1536,8 @@ function settingsHtml(message = "") {
       .actions { justify-content: stretch; }
       .actions .btn { flex: 1; }
       .refresh-box { width: 100%; justify-content: space-between; }
+      .api-key-row { grid-template-columns: 1fr 42px 42px; }
+      .icon-btn { width: 42px; }
     }
   </style>
 </head>
@@ -1586,7 +1628,11 @@ function settingsHtml(message = "") {
 
         <div class="field">
           <label>API Key</label>
-          <input type="text" name="apiKey" value="${htmlEscape(c.apiKey)}">
+          <div class="api-key-row">
+            <input id="apiKeyInput" type="text" name="apiKey" value="${htmlEscape(c.apiKey)}" autocomplete="off" spellcheck="false">
+            <button class="icon-btn" type="button" onclick="copyApiKeyFromInput(this)" title="Copy API Key" data-i18n-title="copyApiKey" aria-label="Copy API Key">⧉</button>
+            <button class="icon-btn danger" type="button" onclick="regenerateApiKey(this)" title="Generate new API Key" data-i18n-title="generateApiKey" aria-label="Generate new API Key">↻</button>
+          </div>
           <div class="hint" data-i18n="apiKeyHint">Used by Prowlarr Generic Torznab.</div>
         </div>
 
@@ -1720,6 +1766,12 @@ function settingsHtml(message = "") {
     sessionName: "Session Adı",
     sessionNameHint: "Kalıcı FlareSolverr tarayıcı oturumu adı.",
     apiKeyHint: "Prowlarr Generic Torznab tarafından kullanılır.",
+    copyApiKey: "API anahtarını kopyala",
+    generateApiKey: "Yeni API anahtarı üret",
+    apiKeyCopied: "API anahtarı kopyalandı",
+    apiKeyCopyFailed: "API anahtarı kopyalanamadı",
+    apiKeyGenerated: "Yeni API anahtarı üretildi ve kopyalandı. Ayarları kaydettikten sonra Prowlarr API Key alanını da güncelleyin.",
+    apiKeyRotateConfirm: "Yeni API anahtarı üretilecek. Ayarları kaydettikten sonra Prowlarr içindeki API Key alanını da bu yeni anahtarla değiştirmeniz gerekir. Devam edilsin mi?",
     requestTimeout: "İstek Zaman Aşımı Ms",
     requestTimeoutHint: "Cloudflare challenge süresinden yüksek olmalı.",
     withAdult: "Adult sonuçları dahil et",
@@ -1772,6 +1824,12 @@ function settingsHtml(message = "") {
     sessionName: "Session Name",
     sessionNameHint: "Persistent FlareSolverr browser session name.",
     apiKeyHint: "Used by Prowlarr Generic Torznab.",
+    copyApiKey: "Copy API key",
+    generateApiKey: "Generate new API key",
+    apiKeyCopied: "API key copied",
+    apiKeyCopyFailed: "API key copy failed",
+    apiKeyGenerated: "New API key generated and copied. After saving, update the API Key field in Prowlarr too.",
+    apiKeyRotateConfirm: "A new API key will be generated. After saving settings, you must update the API Key field in Prowlarr with this new key. Continue?",
     requestTimeout: "Request Timeout Ms",
     requestTimeoutHint: "Must be higher than Cloudflare challenge duration.",
     withAdult: "Include adult results",
@@ -1816,6 +1874,12 @@ function settingsHtml(message = "") {
   document.querySelectorAll("[data-i18n]").forEach(function (el) {
     var key = el.getAttribute("data-i18n");
     el.textContent = dict[key] || en[key] || el.textContent;
+  });
+
+  document.querySelectorAll("[data-i18n-title]").forEach(function (el) {
+    var key = el.getAttribute("data-i18n-title");
+    el.title = dict[key] || en[key] || el.title;
+    el.setAttribute("aria-label", el.title);
   });
 
   var torznabUrl = document.getElementById("torznabUrl");
@@ -1914,6 +1978,59 @@ function settingsHtml(message = "") {
     }
     return json || { ok: true, text: text };
   }
+
+  function generateHexApiKey(byteCount) {
+    byteCount = byteCount || 20;
+
+    if (window.crypto && window.crypto.getRandomValues) {
+      var bytes = new Uint8Array(byteCount);
+      window.crypto.getRandomValues(bytes);
+      return Array.prototype.map.call(bytes, function (b) {
+        return b.toString(16).padStart(2, "0");
+      }).join("");
+    }
+
+    var out = "";
+    var chars = "0123456789abcdef";
+    for (var i = 0; i < byteCount * 2; i++) {
+      out += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return out;
+  }
+
+  window.copyApiKeyFromInput = async function () {
+    var input = document.getElementById("apiKeyInput");
+    if (!input) return;
+
+    var ok = await copyText(input.value.trim());
+
+    if (ok) {
+      showToast(dict.apiKeyCopied || "API key copied", "ok");
+    } else {
+      showToast(dict.apiKeyCopyFailed || "API key copy failed", "err");
+    }
+  };
+
+  window.regenerateApiKey = async function () {
+    var input = document.getElementById("apiKeyInput");
+    if (!input) return;
+
+    var msg = dict.apiKeyRotateConfirm || "A new API key will be generated. Continue?";
+    if (!window.confirm(msg)) return;
+
+    var newKey = generateHexApiKey(20);
+    input.value = newKey;
+    input.focus();
+    input.select();
+
+    var ok = await copyText(newKey);
+
+    if (ok) {
+      showToast(dict.apiKeyGenerated || "New API key generated and copied.", "ok");
+    } else {
+      showToast((dict.apiKeyGenerated || "New API key generated.") + " " + (dict.apiKeyCopyFailed || "Copy failed."), "err");
+    }
+  };
 
   window.manualWarmAction = async function (btn) {
     try {
