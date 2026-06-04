@@ -365,30 +365,86 @@ function clearExpiredCache() {
   return { removedSearches, removedMagnets };
 }
 
+function padNumberText(value, width) {
+  const n = String(value || "").replace(/\D+/g, "");
+  if (!n) return "";
+  return n.padStart(width, "0");
+}
+
+function buildTvToken(params) {
+  const season = padNumberText(params.get("season"), 2);
+  const ep = padNumberText(params.get("ep") || params.get("episode"), 2);
+
+  if (season && ep) {
+    return `S${season}E${ep}`;
+  }
+
+  if (season) {
+    return `S${season}`;
+  }
+
+  return "";
+}
+
+function normalizeSearchQueryText(q) {
+  return String(q || "")
+    // Sonarr/Prowlarr can send "Title : S02". EXT searches work better without the colon.
+    .replace(/\s*:\s*/g, " ")
+    // "Season 2 Episode 4" / "Season 2 Ep 4" / "Season 2 E4" -> "S02E04"
+    .replace(/\bSeason\s*(\d{1,2})\s*(?:Episode|Ep|E)\s*(\d{1,3})\b/gi, (_, s, e) => {
+      return `S${String(s).padStart(2, "0")}E${String(e).padStart(2, "0")}`;
+    })
+    // "Season 2" -> "S02"
+    .replace(/\bSeason\s*(\d{1,2})\b/gi, (_, s) => {
+      return `S${String(s).padStart(2, "0")}`;
+    })
+    // "S 2 E 4" / "S2E4" / "S02E4" -> "S02E04"
+    .replace(/\bS\s*(\d{1,2})\s*E\s*(\d{1,3})\b/gi, (_, s, e) => {
+      return `S${String(s).padStart(2, "0")}E${String(e).padStart(2, "0")}`;
+    })
+    // "S 2" / "S2" -> "S02"
+    .replace(/\bS\s*(\d{1,2})\b/gi, (_, s) => {
+      return `S${String(s).padStart(2, "0")}`;
+    })
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function queryHasTvToken(q) {
+  return /\bS\d{2}(?:E\d{2,3})?\b/i.test(String(q || ""));
+}
+
 function buildSearchQuery(params) {
-  let q = params.get("q") || "";
-
-  if (!q) {
-    q = params.get("search") || "";
-  }
+  let q = params.get("q") || params.get("search") || "";
 
   if (!q) {
     q = config.warmQuery || "warm";
   }
 
-  if (config.stripSeasonFromSearch) {
-    q = q
-      .replace(/\bS\d{1,2}E\d{1,3}\b/gi, "")
-      .replace(/\bS\d{1,2}\b/gi, "")
-      .replace(/\bSeason\s*\d{1,2}\b/gi, "")
-      .replace(/:/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+  q = normalizeSearchQueryText(q);
+
+  const tvToken = buildTvToken(params);
+
+  // Prowlarr tvsearch may pass season/ep separately instead of embedding them in q.
+  // Keep the season/episode token and normalize it into: "Title S02" or "Title S02E04".
+  if (tvToken && !queryHasTvToken(q)) {
+    q = normalizeSearchQueryText(`${q} ${tvToken}`);
   }
+
+  // The old config field name is kept for backward compatibility.
+  // It now means "normalize TV tokens" rather than removing them.
+  q = normalizeSearchQueryText(q);
 
   if (!q) {
     q = config.warmQuery || "warm";
   }
+
+  log("[query]", "built", JSON.stringify({
+    t: params.get("t") || "",
+    q,
+    season: params.get("season") || "",
+    ep: params.get("ep") || params.get("episode") || ""
+  }));
 
   return q;
 }
@@ -1704,8 +1760,8 @@ function settingsHtml(message = "") {
         <div class="check">
           <input id="stripSeason" type="checkbox" name="stripSeasonFromSearch" ${c.stripSeasonFromSearch ? "checked" : ""}>
           <div>
-            <label for="stripSeason" data-i18n="stripSeason">Strip season/episode tokens</label>
-            <small data-i18n="stripSeasonHint">Cleans S01E01, S01 and Season 1 patterns from searches.</small>
+            <label for="stripSeason" data-i18n="stripSeason">Normalize season/episode tokens</label>
+            <small data-i18n="stripSeasonHint">Normalizes Season 2 / S2 / S02E4 style searches into S02 or S02E04.</small>
           </div>
         </div>
       </div>
@@ -1859,8 +1915,8 @@ function settingsHtml(message = "") {
     requestTimeoutHint: "Cloudflare challenge süresinden yüksek olmalı.",
     withAdult: "Adult sonuçları dahil et",
     withAdultHint: "Browse isteklerine with_adult=1 ekler.",
-    stripSeason: "Sezon/bölüm kalıplarını temizle",
-    stripSeasonHint: "Aramalardan S01E01, S01 ve Season 1 gibi kalıpları temizler.",
+    stripSeason: "Sezon/bölüm kalıplarını düzelt",
+    stripSeasonHint: "Season 2 / S2 / S02E4 gibi aramaları S02 veya S02E04 biçimine çevirir.",
     warmCache: "Warm ve Önbellek",
     warmCacheDesc: "Cloudflare oturumunu sıcak tutar ve tekrar eden site isteklerini azaltır.",
     warmQuery: "Warm Arama Kelimesi",
@@ -1939,8 +1995,8 @@ function settingsHtml(message = "") {
     requestTimeoutHint: "Must be higher than Cloudflare challenge duration.",
     withAdult: "Include adult results",
     withAdultHint: "Adds with_adult=1 to browse requests.",
-    stripSeason: "Strip season/episode tokens",
-    stripSeasonHint: "Cleans S01E01, S01 and Season 1 patterns from searches.",
+    stripSeason: "Normalize season/episode tokens",
+    stripSeasonHint: "Normalizes Season 2 / S2 / S02E4 style searches into S02 or S02E04.",
     warmCache: "Warm and Cache",
     warmCacheDesc: "Keeps the Cloudflare session warm and limits repeated site requests.",
     warmQuery: "Warm Query",
