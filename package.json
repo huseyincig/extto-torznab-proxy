@@ -1,10 +1,11 @@
 {
   "name": "extto-torznab-proxy",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "EXT.to / Extranet Torrentbay Torznab proxy with FlareSolverr, warm session, cache and web settings",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
   },
   "license": "MIT",
   "engines": {

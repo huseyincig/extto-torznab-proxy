@@ -61,7 +61,7 @@ services:
 For a pinned version, use:
 
 ```yaml
-image: ghcr.io/huseyincig/extto-torznab-proxy:1.0.0
+image: ghcr.io/huseyincig/extto-torznab-proxy:1.0.1
 ```
 
 ## Web UI
@@ -137,12 +137,12 @@ This repository includes a GitHub Actions workflow that publishes multi-arch ima
 
 ```text
 ghcr.io/huseyincig/extto-torznab-proxy:latest
-ghcr.io/huseyincig/extto-torznab-proxy:1.0.0
+ghcr.io/huseyincig/extto-torznab-proxy:1.0.1
 ```
 
 Push a release tag to publish a versioned image:
 
 ```sh
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.0.1
+git push origin v1.0.1
 ```

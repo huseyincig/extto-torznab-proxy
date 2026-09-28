@@ -4,6 +4,7 @@ const path = require("path");
 const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || "8998");
+const APP_VERSION = "1.0.1";
 const CONFIG_DIR = process.env.CONFIG_DIR || "/config";
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
@@ -669,7 +670,7 @@ function getPublicBaseUrl(req) {
 function torznabCapsXml() {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <caps>
-  <server title="EXT Torznab Proxy" version="1.0.0" />
+  <server title="EXT Torznab Proxy" version="${APP_VERSION}" />
   <limits max="100" default="50" />
   <searching>
     <search available="yes" supportedParams="q" />
@@ -836,7 +837,26 @@ async function fetchMagnetOnce(relPath, id) {
     throw new Error(json.error || "magnet failed");
   }
 
-  return json.magnet;
+  return normalizeMagnet(json.magnet);
+}
+
+function normalizeMagnet(value) {
+  if (typeof value !== "string") {
+    throw new Error("invalid magnet: expected string");
+  }
+
+  // 1. Strip control characters (CR, LF, null byte, del, etc.) and trim outer whitespace
+  let magnet = value.replace(/[\x00-\x1F\x7F]/g, "").trim();
+
+  if (!magnet.startsWith("magnet:?")) {
+    throw new Error("invalid magnet URI: missing magnet:? prefix");
+  }
+
+  // 2. Percent-encode spaces and non-ASCII characters (> 127) for HTTP Location header compliance (RFC 7230 / RFC 3986).
+  // Printable ASCII characters (33 to 126, including existing %3A, %2F, +, &, etc.) remain completely untouched.
+  magnet = magnet.replace(/[^\x21-\x7E]/g, (ch) => (ch === " " ? "%20" : encodeURIComponent(ch)));
+
+  return magnet;
 }
 
 async function fetchMagnet(relPath, id) {
@@ -862,42 +882,54 @@ async function handleDownload(req, res, u) {
   const cached = getCache(magnetCache, id);
   if (cached) {
     log("[cache] magnet hit", id);
+    try {
+      const loc = normalizeMagnet(cached);
+      res.writeHead(302, {
+        Location: loc,
+        "cache-control": "private, max-age=86400"
+      });
+      return res.end();
+    } catch (e) {
+      warn("[cache] invalid cached magnet, purging:", e.message || e);
+      magnetCache.delete(id);
+    }
+  }
+
+  try {
+    const magnet = await withFsLock(async () => {
+      const cachedAgain = getCache(magnetCache, id);
+      if (cachedAgain) {
+        log("[cache] magnet hit after wait", id);
+        return normalizeMagnet(cachedAgain);
+      }
+
+      log("[flaresolverr] magnet fetch", id);
+
+      const raw = await fetchMagnet(relPath, id);
+      const m = normalizeMagnet(raw);
+
+      setLimitedCache(
+        magnetCache,
+        id,
+        m,
+        Number(config.maxMagnetCacheItems || 1000),
+        Number(config.magnetTtlMinutes || 1440) * 60 * 1000
+      );
+
+      log("[cache] magnet stored", id);
+
+      return m;
+    });
+
     res.writeHead(302, {
-      Location: cached,
+      Location: magnet,
       "cache-control": "private, max-age=86400"
     });
     return res.end();
+  } catch (err) {
+    warn("[download] failed to resolve or normalize magnet for", id, ":", err.message || err);
+    return send(res, 502, "text/plain; charset=utf-8", "failed to resolve upstream magnet: " + (err.message || err));
   }
-
-  const magnet = await withFsLock(async () => {
-    const cachedAgain = getCache(magnetCache, id);
-    if (cachedAgain) {
-      log("[cache] magnet hit after wait", id);
-      return cachedAgain;
-    }
-
-    log("[flaresolverr] magnet fetch", id);
-
-    const m = await fetchMagnet(relPath, id);
-
-    setLimitedCache(
-      magnetCache,
-      id,
-      m,
-      Number(config.maxMagnetCacheItems || 1000),
-      Number(config.magnetTtlMinutes || 1440) * 60 * 1000
-    );
-
-    log("[cache] magnet stored", id);
-
-    return m;
-  });
-
-  res.writeHead(302, {
-    Location: magnet,
-    "cache-control": "private, max-age=86400"
-  });
-  res.end();
 }
 
 async function doWarm() {
@@ -2445,7 +2477,7 @@ setInterval(() => {
   if (r.removedSearches > 0 || r.removedMagnets > 0) {
     log("[cache] expired removed searches=", r.removedSearches, "magnets=", r.removedMagnets);
   }
-}, 5 * 60 * 1000);
+}, 5 * 60 * 1000).unref();
 
 setInterval(async () => {
   const idle = Date.now() - lastUsed;
@@ -2455,9 +2487,9 @@ setInterval(async () => {
     log("[idle] destroying session after", config.idleTimeoutMinutes, "minutes");
     await destroySessionUnlocked();
   }
-}, 60 * 1000);
+}, 60 * 1000).unref();
 
-http.createServer(async (req, res) => {
+const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, "http://x");
 
@@ -2485,7 +2517,7 @@ http.createServer(async (req, res) => {
       return send(res, 200, "application/json; charset=utf-8", JSON.stringify({
         ok: true,
         app: "extto-torznab-proxy",
-        version: "1.0.0",
+        version: APP_VERSION,
         baseUrl: config.baseUrl,
         flaresolverrUrl: config.flaresolverrUrl,
         sessionName: config.sessionName,
@@ -2553,11 +2585,21 @@ http.createServer(async (req, res) => {
     error("[error]", e && e.stack ? e.stack : e);
     return send(res, 500, "text/plain; charset=utf-8", String(e.message || e));
   }
-}).listen(PORT, "0.0.0.0", () => {
-  log("extto-torznab-proxy listening on :" + PORT);
-  log("config:", CONFIG_FILE);
-  log("base:", config.baseUrl);
-  log("flaresolverr:", config.flaresolverrUrl);
-  log("session:", config.sessionName);
-  startWarmTimer();
 });
+
+if (require.main === module) {
+  server.listen(PORT, "0.0.0.0", () => {
+    log("extto-torznab-proxy listening on :" + PORT);
+    log("config:", CONFIG_FILE);
+    log("base:", config.baseUrl);
+    log("flaresolverr:", config.flaresolverrUrl);
+    log("session:", config.sessionName);
+    startWarmTimer();
+  });
+}
+
+module.exports = {
+  APP_VERSION,
+  normalizeMagnet,
+  server,
+};
