@@ -4,8 +4,8 @@ const http = require("node:http");
 
 const srv = require("../server.js");
 
-test("APP_VERSION is 1.0.2", () => {
-  assert.equal(srv.APP_VERSION, "1.0.2");
+test("APP_VERSION is 1.0.3", () => {
+  assert.equal(srv.APP_VERSION, "1.0.3");
 });
 
 test("parseDateToRfc822: parses relative ages accurately instead of current time or year 2001", () => {

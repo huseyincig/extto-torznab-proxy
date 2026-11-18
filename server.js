@@ -4,7 +4,7 @@ const path = require("path");
 const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || "8998");
-const APP_VERSION = "1.0.2";
+const APP_VERSION = "1.0.3";
 const CONFIG_DIR = process.env.CONFIG_DIR || "/config";
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
