@@ -39,9 +39,12 @@ test("xmlEscape: strips XML 1.0 invalid control characters", () => {
   assert.equal(escaped, "BadTitle &amp; &lt;Test&gt;");
 });
 
-test("torznabCapsXml: includes category 7000 (Other) matching categoryFromRow fallback", () => {
+test("torznabCapsXml: exposes only Movies (2000), TV (5000), and Anime (5070)", () => {
   const xml = srv.torznabCapsXml();
-  assert.match(xml, /<category\s+id="7000"\s+name="Other"\s*\/>/);
+  assert.match(xml, /<category\s+id="2000"\s+name="Movies"\s*\/>/);
+  assert.match(xml, /<category\s+id="5000"\s+name="TV"\s*\/>/);
+  assert.match(xml, /<category\s+id="5070"\s+name="Anime"\s*\/>/);
+  assert.doesNotMatch(xml, /id="7000"/);
 });
 
 test("buildSearchQuery: respects stripSeasonFromSearch=false", () => {

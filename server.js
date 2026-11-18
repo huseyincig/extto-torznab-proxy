@@ -775,7 +775,6 @@ function torznabCapsXml() {
     <category id="2000" name="Movies" />
     <category id="5000" name="TV" />
     <category id="5070" name="Anime" />
-    <category id="7000" name="Other" />
   </categories>
 </caps>`;
 }
