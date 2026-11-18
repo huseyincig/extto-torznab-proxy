@@ -1,5 +1,5 @@
 {
-  "baseUrl": "https://ext.to",
+  "baseUrl": "https://extranet.torrentbay.st",
   "publicUrl": "http://YOUR_HOST_IP:8998",
   "flaresolverrUrl": "http://flaresolverr:8191/v1",
   "sessionName": "extto_persistent",

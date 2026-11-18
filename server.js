@@ -4,7 +4,7 @@ const path = require("path");
 const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || "8998");
-const APP_VERSION = "1.0.1";
+const APP_VERSION = "1.0.2";
 const CONFIG_DIR = process.env.CONFIG_DIR || "/config";
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
@@ -28,14 +28,19 @@ const DEFAULT_CONFIG = {
   stripSeasonFromSearch: true
 };
 
-let config = loadConfig();
+let config = { ...DEFAULT_CONFIG };
 
 let sessionReady = false;
+let sessionPending = 0;
 let sessionBusy = false;
+let fsPending = 0;
 let fsBusy = false;
 let lastUsed = Date.now();
 let lastWarm = null;
 let currentWarm = null;
+let warmPromise = null;
+let warmIntervalHandle = null;
+let timersStarted = false;
 
 const searchCache = new Map();
 const magnetCache = new Map();
@@ -94,9 +99,22 @@ function loadConfig() {
 }
 
 function saveConfig(next) {
+  const prev = config;
   ensureConfigDir();
   config = { ...config, ...next };
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+
+  if (
+    normalizeBaseUrl(prev.baseUrl) !== normalizeBaseUrl(config.baseUrl) ||
+    prev.flaresolverrUrl !== config.flaresolverrUrl ||
+    prev.sessionName !== config.sessionName
+  ) {
+    sessionReady = false;
+  }
+
+  if (timersStarted && Number(prev.warmIntervalMinutes) !== Number(config.warmIntervalMinutes)) {
+    rescheduleWarmTimer();
+  }
 }
 
 function normalizeBaseUrl(s) {
@@ -105,6 +123,7 @@ function normalizeBaseUrl(s) {
 
 function xmlEscape(s) {
   return String(s ?? "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -118,12 +137,13 @@ function htmlEscape(s) {
 function decodeEntities(s) {
   return String(s || "")
     .replace(/&nbsp;/g, " ")
-    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
     .replace(/&apos;/g, "'")
     .replace(/&quot;/g, "\"")
-    .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
 }
 
 function stripTags(s) {
@@ -136,43 +156,66 @@ function pick(re, s) {
 }
 
 function withSessionLock(fn) {
-  const run = sessionQueue.then(fn, fn);
-
+  sessionPending++;
   sessionBusy = true;
 
-  sessionQueue = run
-    .catch(() => {})
-    .finally(() => {
-      sessionBusy = false;
-    });
+  const run = sessionQueue.then(fn, fn).finally(() => {
+    sessionPending = Math.max(0, sessionPending - 1);
+    sessionBusy = sessionPending > 0;
+  });
+
+  sessionQueue = run.catch(() => {});
 
   return run;
 }
 
 function withFsLock(fn) {
-  const run = fsQueue.then(fn, fn);
-
+  fsPending++;
   fsBusy = true;
 
-  fsQueue = run
-    .catch(() => {})
-    .finally(() => {
-      fsBusy = false;
-    });
+  const run = fsQueue.then(fn, fn).finally(() => {
+    fsPending = Math.max(0, fsPending - 1);
+    fsBusy = fsPending > 0;
+  });
+
+  fsQueue = run.catch(() => {});
 
   return run;
 }
 
+function formatFetchError(prefix, url, err) {
+  const cause = err && err.cause ? err.cause : null;
+  const parts = [];
+
+  if (cause && cause.code) parts.push(cause.code);
+  if (cause && cause.message && (!cause.code || !cause.message.includes(cause.code))) {
+    parts.push(cause.message);
+  }
+  if (!parts.length && err && err.message) {
+    parts.push(err.message);
+  }
+
+  const detail = parts.join(" - ") || "unknown network error";
+  return new Error(`${prefix} at ${url}: ${detail}`, { cause: err });
+}
+
 async function fsCall(payload) {
   const url = config.flaresolverrUrl;
+  const timeoutMs = Math.max(Number(config.requestTimeoutMs || 120000) + 15000, 30000);
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
+  let r;
+  try {
+    r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+  } catch (e) {
+    throw formatFetchError("FlareSolverr unreachable", url, e);
+  }
 
   const text = await r.text();
 
@@ -275,6 +318,9 @@ async function fetchHtmlViaFlaresolverr(targetUrl) {
       session: config.sessionName,
       maxTimeout: Number(config.requestTimeoutMs || 120000)
     });
+    if (!pageRes || !pageRes.solution || !pageRes.solution.response) {
+      throw new Error("empty html response");
+    }
   } catch (e) {
     warn("[retry] request.get failed, resetting session:", e.message || e);
 
@@ -301,7 +347,17 @@ async function fetchHtmlViaFlaresolverr(targetUrl) {
 }
 
 function setLimitedCache(map, key, value, maxItems, ttlMs) {
-  if (map.size >= maxItems) {
+  const now = Date.now();
+
+  if (!map.has(key) && map.size >= maxItems) {
+    for (const [k, v] of map.entries()) {
+      if (now > v.expiresAt) {
+        map.delete(k);
+      }
+    }
+  }
+
+  if (!map.has(key) && map.size >= maxItems) {
     let oldestKey = null;
     let oldestTime = Infinity;
 
@@ -317,8 +373,6 @@ function setLimitedCache(map, key, value, maxItems, ttlMs) {
       map.delete(oldestKey);
     }
   }
-
-  const now = Date.now();
 
   map.set(key, {
     value,
@@ -422,19 +476,21 @@ function buildSearchQuery(params) {
     q = config.warmQuery || "warm";
   }
 
-  q = normalizeSearchQueryText(q);
+  const normalizeTv = config.stripSeasonFromSearch !== false;
+  q = normalizeTv ? normalizeSearchQueryText(q) : String(q).replace(/\s+/g, " ").trim();
 
   const tvToken = buildTvToken(params);
 
   // Prowlarr tvsearch may pass season/ep separately instead of embedding them in q.
   // Keep the season/episode token and normalize it into: "Title S02" or "Title S02E04".
   if (tvToken && !queryHasTvToken(q)) {
-    q = normalizeSearchQueryText(`${q} ${tvToken}`);
+    const combined = `${q} ${tvToken}`.replace(/\s+/g, " ").trim();
+    q = normalizeTv ? normalizeSearchQueryText(combined) : combined;
   }
 
-  // The old config field name is kept for backward compatibility.
-  // It now means "normalize TV tokens" rather than removing them.
-  q = normalizeSearchQueryText(q);
+  if (normalizeTv) {
+    q = normalizeSearchQueryText(q);
+  }
 
   if (!q) {
     q = config.warmQuery || "warm";
@@ -455,7 +511,7 @@ async function fetchBrowse(q) {
   const withAdult = config.withAdult ? "1" : "0";
   const searchPath = `/browse/?q=${encodeURIComponent(q).replace(/%20/g, "+")}&with_adult=${withAdult}`;
   const targetUrl = baseUrl + searchPath;
-  const cacheKey = searchPath;
+  const cacheKey = targetUrl;
   const cached = getCache(searchCache, cacheKey);
 
   if (cached) {
@@ -543,15 +599,53 @@ function parseSizeToBytes(s) {
   return Math.max(0, Math.floor(n * mult));
 }
 
-function parseDateToRfc822(s) {
-  const text = stripTags(s);
+function parseDateToRfc822(s, nowMs = Date.now()) {
+  const text = stripTags(s).trim();
+  const lower = text.toLowerCase();
+
+  if (!text || lower === "just now" || lower === "now" || lower === "today") {
+    return new Date(nowMs).toUTCString();
+  }
+
+  if (lower === "yesterday") {
+    return new Date(nowMs - 86400 * 1000).toUTCString();
+  }
+
+  const relMatch = lower.match(
+    /^(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|mos|month|months|y|yr|yrs|year|years)(?:\s+ago)?$/i
+  );
+
+  if (relMatch) {
+    const amount = Number(relMatch[1]);
+    const unit = relMatch[2].toLowerCase();
+    const d = new Date(nowMs);
+
+    if (unit === "s" || unit.startsWith("sec")) {
+      d.setTime(nowMs - amount * 1000);
+    } else if (unit === "m" || unit.startsWith("min")) {
+      d.setTime(nowMs - amount * 60 * 1000);
+    } else if (unit === "h" || unit.startsWith("hr") || unit.startsWith("hour")) {
+      d.setTime(nowMs - amount * 3600 * 1000);
+    } else if (unit === "d" || unit.startsWith("day")) {
+      d.setTime(nowMs - amount * 86400 * 1000);
+    } else if (unit === "w" || unit.startsWith("wk") || unit.startsWith("week")) {
+      d.setTime(nowMs - amount * 7 * 86400 * 1000);
+    } else if (unit.startsWith("mo")) {
+      d.setUTCMonth(d.getUTCMonth() - amount);
+    } else if (unit === "y" || unit.startsWith("yr") || unit.startsWith("year")) {
+      d.setUTCFullYear(d.getUTCFullYear() - amount);
+    }
+
+    return d.toUTCString();
+  }
+
   const d = new Date(text);
 
   if (!isNaN(d.getTime())) {
     return d.toUTCString();
   }
 
-  return new Date().toUTCString();
+  return new Date(nowMs).toUTCString();
 }
 
 function categoryFromRow(row) {
@@ -631,8 +725,8 @@ function parseResults(html, req) {
     const leechersText = tds[5] ? stripTags(tds[5]) : "0";
 
     const size = parseSizeToBytes(sizeText);
-    const seeders = Number((seedersText.match(/\d+/) || ["0"])[0]);
-    const leechers = Number((leechersText.match(/\d+/) || ["0"])[0]);
+    const seeders = Number((seedersText.replace(/,/g, "").match(/\d+/) || ["0"])[0]);
+    const leechers = Number((leechersText.replace(/,/g, "").match(/\d+/) || ["0"])[0]);
     const category = categoryFromRow(row);
 
     const publicBase = getPublicBaseUrl(req);
@@ -681,6 +775,7 @@ function torznabCapsXml() {
     <category id="2000" name="Movies" />
     <category id="5000" name="TV" />
     <category id="5070" name="Anime" />
+    <category id="7000" name="Other" />
   </categories>
 </caps>`;
 }
@@ -738,11 +833,16 @@ async function handleApi(req, res, u) {
   }
 
   if (t === "search" || t === "movie" || t === "tvsearch") {
-    const q = buildSearchQuery(u.searchParams);
-    const html = await fetchBrowse(q);
-    const items = parseResults(html, req);
+    try {
+      const q = buildSearchQuery(u.searchParams);
+      const html = await fetchBrowse(q);
+      const items = parseResults(html, req);
 
-    return send(res, 200, "application/rss+xml; charset=utf-8", torznabResultsXml(items));
+      return send(res, 200, "application/rss+xml; charset=utf-8", torznabResultsXml(items));
+    } catch (e) {
+      error("[api]", e && e.stack ? e.stack : e);
+      return send(res, 500, "application/xml; charset=utf-8", torznabErrorXml(900, String(e.message || e)));
+    }
   }
 
   return send(res, 400, "application/xml; charset=utf-8", torznabErrorXml(200, "Unsupported function"));
@@ -762,19 +862,28 @@ async function postMagnetDirect({ id, ts, hmac, csrf, referer, cookies, userAgen
     sessid: csrf
   }).toString();
 
-  const r = await fetch(normalizeBaseUrl(config.baseUrl) + "/ajax/getTorrentMagnet.php", {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-      "x-requested-with": "XMLHttpRequest",
-      "referer": referer,
-      "origin": normalizeBaseUrl(config.baseUrl),
-      "user-agent": userAgent,
-      "accept": "application/json, text/javascript, */*; q=0.01",
-      "cookie": cookiesToHeader(cookies)
-    },
-    body: postData
-  });
+  const ajaxUrl = normalizeBaseUrl(config.baseUrl) + "/ajax/getTorrentMagnet.php";
+  const timeoutMs = Math.max(Number(config.requestTimeoutMs || 120000), 15000);
+
+  let r;
+  try {
+    r = await fetch(ajaxUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "x-requested-with": "XMLHttpRequest",
+        "referer": referer,
+        "origin": normalizeBaseUrl(config.baseUrl),
+        "user-agent": userAgent,
+        "accept": "application/json, text/javascript, */*; q=0.01",
+        "cookie": cookiesToHeader(cookies)
+      },
+      body: postData,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+  } catch (e) {
+    throw formatFetchError("Magnet AJAX request failed", ajaxUrl, e);
+  }
 
   const text = await r.text();
 
@@ -809,8 +918,8 @@ async function fetchMagnetOnce(relPath, id) {
   const solution = pageRes && pageRes.solution ? pageRes.solution : {};
   const page = solution.response || "";
 
-  const pageToken = pick(/window\.pageToken\s*=\s*'([^']+)'/, page);
-  const csrf = pick(/window\.csrfToken\s*=\s*'([^']+)'/, page);
+  const pageToken = pick(/window\.pageToken\s*=\s*['"]([^'"]+)['"]/, page);
+  const csrf = pick(/window\.csrfToken\s*=\s*['"]([^'"]+)['"]/, page);
 
   if (!pageToken || !csrf) {
     throw new Error("token parse failed");
@@ -875,7 +984,14 @@ async function handleDownload(req, res, u) {
   const id = u.searchParams.get("id") || "";
   const relPath = u.searchParams.get("path") || "";
 
-  if (!id || !relPath || !relPath.startsWith("/") || !relPath.endsWith("/")) {
+  if (
+    !/^\d+$/.test(id) ||
+    !relPath ||
+    !relPath.startsWith("/") ||
+    relPath.startsWith("//") ||
+    relPath.includes("..") ||
+    !relPath.endsWith("/")
+  ) {
     return send(res, 400, "text/plain; charset=utf-8", "bad download parameters");
   }
 
@@ -933,100 +1049,134 @@ async function handleDownload(req, res, u) {
 }
 
 async function doWarm() {
-  const start = Date.now();
-  const q = config.warmQuery || "warm";
+  if (warmPromise) {
+    return await warmPromise;
+  }
 
-  currentWarm = {
-    running: true,
-    query: q,
-    startedAt: new Date().toISOString()
-  };
+  warmPromise = (async () => {
+    const start = Date.now();
+    const q = config.warmQuery || "warm";
 
-  try {
-    // Warm gerçek siteye gitmeli. Lokal search cache'den dönerse Cloudflare/session sıcak tutulmaz.
-    const withAdult = config.withAdult ? "1" : "0";
-    const warmCacheKey = `/browse/?q=${encodeURIComponent(q).replace(/%20/g, "+")}&with_adult=${withAdult}`;
-    searchCache.delete(warmCacheKey);
-
-    await fetchBrowse(q);
-
-    const durationMs = Date.now() - start;
-    const duration = Math.round(durationMs / 1000);
-
-    lastWarm = {
-      ok: true,
+    currentWarm = {
+      running: true,
       query: q,
-      durationSeconds: duration,
-      durationMs,
-      cacheBypassed: true,
-      state: duration >= Number(config.coldThresholdSeconds || 30) ? "COLD_OR_CHALLENGE" : "WARM",
-      at: new Date().toISOString()
+      startedAt: new Date().toISOString()
     };
 
-    log("[warm]", `query=${q}`, `duration=${duration}s`, `durationMs=${durationMs}`, `state=${lastWarm.state}`, "cacheBypassed=true");
+    try {
+      // Warm gerçek siteye gitmeli. Lokal search cache'den dönerse Cloudflare/session sıcak tutulmaz.
+      const baseUrl = normalizeBaseUrl(config.baseUrl);
+      const withAdult = config.withAdult ? "1" : "0";
+      const warmCacheKey = `${baseUrl}/browse/?q=${encodeURIComponent(q).replace(/%20/g, "+")}&with_adult=${withAdult}`;
+      searchCache.delete(warmCacheKey);
 
-    return lastWarm;
-  } catch (e) {
-    const durationMs = Date.now() - start;
-    const duration = Math.round(durationMs / 1000);
+      await fetchBrowse(q);
 
-    lastWarm = {
-      ok: false,
-      query: q,
-      durationSeconds: duration,
-      durationMs,
-      cacheBypassed: true,
-      state: "ERROR",
-      error: e.message || String(e),
-      at: new Date().toISOString()
-    };
+      const durationMs = Date.now() - start;
+      const duration = Math.round(durationMs / 1000);
 
-    warn("[warm] failed", e.message || e);
+      lastWarm = {
+        ok: true,
+        query: q,
+        durationSeconds: duration,
+        durationMs,
+        cacheBypassed: true,
+        state: duration >= Number(config.coldThresholdSeconds || 30) ? "COLD_OR_CHALLENGE" : "WARM",
+        at: new Date().toISOString()
+      };
 
-    return lastWarm;
-  } finally {
-    currentWarm = null;
+      log("[warm]", `query=${q}`, `duration=${duration}s`, `durationMs=${durationMs}`, `state=${lastWarm.state}`, "cacheBypassed=true");
+
+      return lastWarm;
+    } catch (e) {
+      const durationMs = Date.now() - start;
+      const duration = Math.round(durationMs / 1000);
+
+      lastWarm = {
+        ok: false,
+        query: q,
+        durationSeconds: duration,
+        durationMs,
+        cacheBypassed: true,
+        state: "ERROR",
+        error: e.message || String(e),
+        at: new Date().toISOString()
+      };
+
+      warn("[warm] failed", e.message || e);
+
+      return lastWarm;
+    } finally {
+      currentWarm = null;
+      warmPromise = null;
+    }
+  })();
+
+  return await warmPromise;
+}
+
+function runWarmTick(reason) {
+  if (!config.warmEnabled) return Promise.resolve();
+
+  log("[warm] scheduled", reason || "timer");
+
+  return doWarm().catch(e => {
+    warn("[warm] background failed", e.message || e);
+  });
+}
+
+function rescheduleWarmTimer() {
+  if (warmIntervalHandle) {
+    clearInterval(warmIntervalHandle);
+    warmIntervalHandle = null;
+  }
+
+  const intervalMs = Math.max(1, Number(config.warmIntervalMinutes || 10)) * 60 * 1000;
+  warmIntervalHandle = setInterval(() => {
+    runWarmTick("interval").catch(e => {
+      warn("[warm] interval failed", e.message || e);
+    });
+  }, intervalMs);
+
+  if (typeof warmIntervalHandle.unref === "function") {
+    warmIntervalHandle.unref();
   }
 }
 
 function startWarmTimer() {
-  async function tick(reason) {
-    if (!config.warmEnabled) return;
-
-    log("[warm] scheduled", reason || "timer");
-
-    try {
-      await doWarm();
-    } catch (e) {
-      warn("[warm] background failed", e.message || e);
-    }
-  }
-
   // İlk açılışta 10 dakika bekleme; servis başladıktan kısa süre sonra warm yap.
-  setTimeout(() => {
-    tick("startup").catch(e => {
+  const startupTimer = setTimeout(() => {
+    runWarmTick("startup").catch(e => {
       warn("[warm] startup failed", e.message || e);
     });
   }, 5000);
 
-  setInterval(() => {
-    tick("interval").catch(e => {
-      warn("[warm] interval failed", e.message || e);
-    });
-  }, Math.max(1, Number(config.warmIntervalMinutes || 10)) * 60 * 1000);
+  if (typeof startupTimer.unref === "function") {
+    startupTimer.unref();
+  }
+
+  rescheduleWarmTimer();
 }
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
+    let tooLarge = false;
     req.on("data", chunk => {
+      if (tooLarge) return;
       data += chunk;
       if (data.length > 1024 * 1024) {
+        tooLarge = true;
+        req.destroy();
         reject(new Error("body too large"));
       }
     });
-    req.on("end", () => resolve(data));
-    req.on("error", reject);
+    req.on("end", () => {
+      if (!tooLarge) resolve(data);
+    });
+    req.on("error", err => {
+      if (!tooLarge) reject(err);
+    });
   });
 }
 
@@ -2440,26 +2590,37 @@ function settingsHtml(message = "") {
 </html>`;
 }
 
+function positiveInt(value, fallback, min = 1) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < min) return fallback;
+  return Math.floor(n);
+}
+
 function parseForm(body) {
   const p = new URLSearchParams(body);
+  const baseUrl = normalizeBaseUrl(p.get("baseUrl")) || config.baseUrl || DEFAULT_CONFIG.baseUrl;
+  const flaresolverrUrl = String(p.get("flaresolverrUrl") || "").trim() || config.flaresolverrUrl || DEFAULT_CONFIG.flaresolverrUrl;
+  const sessionName = String(p.get("sessionName") || "").trim() || config.sessionName || DEFAULT_CONFIG.sessionName;
+  const warmQuery = String(p.get("warmQuery") || "").trim() || config.warmQuery || DEFAULT_CONFIG.warmQuery;
+
   return {
-    baseUrl: normalizeBaseUrl(p.get("baseUrl")),
+    baseUrl,
     publicUrl: normalizeBaseUrl(p.get("publicUrl")),
-    flaresolverrUrl: p.get("flaresolverrUrl"),
-    sessionName: p.get("sessionName"),
-    apiKey: p.get("apiKey"),
+    flaresolverrUrl,
+    sessionName,
+    apiKey: String(p.get("apiKey") ?? "").trim(),
     withAdult: boolFromForm(p.get("withAdult")),
     stripSeasonFromSearch: boolFromForm(p.get("stripSeasonFromSearch")),
     warmEnabled: boolFromForm(p.get("warmEnabled")),
-    warmQuery: p.get("warmQuery"),
-    warmIntervalMinutes: Number(p.get("warmIntervalMinutes") || 10),
-    coldThresholdSeconds: Number(p.get("coldThresholdSeconds") || 30),
-    searchTtlSeconds: Number(p.get("searchTtlSeconds") || 180),
-    magnetTtlMinutes: Number(p.get("magnetTtlMinutes") || 1440),
-    maxSearchCacheItems: Number(p.get("maxSearchCacheItems") || 100),
-    maxMagnetCacheItems: Number(p.get("maxMagnetCacheItems") || 1000),
-    requestTimeoutMs: Number(p.get("requestTimeoutMs") || 120000),
-    idleTimeoutMinutes: Number(p.get("idleTimeoutMinutes") || 360)
+    warmQuery,
+    warmIntervalMinutes: positiveInt(p.get("warmIntervalMinutes"), config.warmIntervalMinutes || 10, 1),
+    coldThresholdSeconds: positiveInt(p.get("coldThresholdSeconds"), config.coldThresholdSeconds || 30, 1),
+    searchTtlSeconds: positiveInt(p.get("searchTtlSeconds"), config.searchTtlSeconds || 180, 1),
+    magnetTtlMinutes: positiveInt(p.get("magnetTtlMinutes"), config.magnetTtlMinutes || 1440, 1),
+    maxSearchCacheItems: positiveInt(p.get("maxSearchCacheItems"), config.maxSearchCacheItems || 100, 1),
+    maxMagnetCacheItems: positiveInt(p.get("maxMagnetCacheItems"), config.maxMagnetCacheItems || 1000, 1),
+    requestTimeoutMs: positiveInt(p.get("requestTimeoutMs"), config.requestTimeoutMs || 120000, 1000),
+    idleTimeoutMinutes: positiveInt(p.get("idleTimeoutMinutes"), config.idleTimeoutMinutes || 360, 1)
   };
 }
 
@@ -2471,23 +2632,34 @@ function send(res, status, type, body) {
   res.end(body);
 }
 
-setInterval(() => {
-  const r = clearExpiredCache();
+function startBackgroundTimers() {
+  if (timersStarted) return;
+  timersStarted = true;
 
-  if (r.removedSearches > 0 || r.removedMagnets > 0) {
-    log("[cache] expired removed searches=", r.removedSearches, "magnets=", r.removedMagnets);
-  }
-}, 5 * 60 * 1000).unref();
+  setInterval(() => {
+    const r = clearExpiredCache();
 
-setInterval(async () => {
-  const idle = Date.now() - lastUsed;
-  const idleTimeoutMs = Number(config.idleTimeoutMinutes || 360) * 60 * 1000;
+    if (r.removedSearches > 0 || r.removedMagnets > 0) {
+      log("[cache] expired removed searches=", r.removedSearches, "magnets=", r.removedMagnets);
+    }
+  }, 5 * 60 * 1000).unref();
 
-  if (sessionReady && idle > idleTimeoutMs) {
-    log("[idle] destroying session after", config.idleTimeoutMinutes, "minutes");
-    await destroySessionUnlocked();
-  }
-}, 60 * 1000).unref();
+  setInterval(async () => {
+    const idle = Date.now() - lastUsed;
+    const idleTimeoutMs = Number(config.idleTimeoutMinutes || 360) * 60 * 1000;
+
+    if (sessionReady && idle > idleTimeoutMs) {
+      log("[idle] destroying session after", config.idleTimeoutMinutes, "minutes");
+      await withSessionLock(async () => {
+        if (sessionReady && Date.now() - lastUsed > idleTimeoutMs) {
+          await destroySessionUnlocked();
+        }
+      });
+    }
+  }, 60 * 1000).unref();
+
+  startWarmTimer();
+}
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -2567,8 +2739,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && u.pathname === "/session/reset") {
-      await destroySessionUnlocked();
-      sessionReady = false;
+      await withSessionLock(async () => {
+        await destroySessionUnlocked();
+      });
       return send(res, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true, sessionReset: true }, null, 2));
     }
 
@@ -2588,18 +2761,31 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (require.main === module) {
+  config = loadConfig();
   server.listen(PORT, "0.0.0.0", () => {
     log("extto-torznab-proxy listening on :" + PORT);
     log("config:", CONFIG_FILE);
     log("base:", config.baseUrl);
     log("flaresolverr:", config.flaresolverrUrl);
     log("session:", config.sessionName);
-    startWarmTimer();
+    startBackgroundTimers();
   });
 }
 
 module.exports = {
   APP_VERSION,
   normalizeMagnet,
+  parseDateToRfc822,
+  decodeEntities,
+  xmlEscape,
+  torznabCapsXml,
+  buildSearchQuery,
+  parseResults,
+  setLimitedCache,
+  fsCall,
+  getConfig: () => config,
+  setConfigForTest: (partial) => {
+    config = { ...config, ...partial };
+  },
   server,
 };
