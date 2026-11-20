@@ -441,6 +441,21 @@ function buildTvToken(params) {
   return "";
 }
 
+function normalizeImdbId(value) {
+  let id = String(value || "").trim();
+
+  // Accept IMDb IDs with or without the "tt" prefix.
+  if (/^\\d{5,12}$/.test(id)) {
+    id = `tt${id}`;
+  }
+
+  if (!/^tt\\d{5,12}$/i.test(id)) {
+    throw new Error("Invalid IMDb ID");
+  }
+
+  return id.toLowerCase();
+}
+
 function normalizeSearchQueryText(q) {
   return String(q || "")
     // Sonarr/Prowlarr can send "Title : S02". EXT searches work better without the colon.
@@ -506,10 +521,18 @@ function buildSearchQuery(params) {
   return q;
 }
 
-async function fetchBrowse(q) {
+async function fetchBrowse(q, imdbId = "") {
   const baseUrl = normalizeBaseUrl(config.baseUrl);
-  const withAdult = config.withAdult ? "1" : "0";
-  const searchPath = `/browse/?q=${encodeURIComponent(q).replace(/%20/g, "+")}&with_adult=${withAdult}`;
+  let searchPath;
+
+  if (imdbId) {
+    const normalizedId = normalizeImdbId(imdbId);
+    searchPath = `/browse/?imdb_id=${encodeURIComponent(normalizedId)}`;
+  } else {
+    const withAdult = config.withAdult ? "1" : "0";
+    searchPath = `/browse/?q=${encodeURIComponent(q).replace(/%20/g, "+")}&with_adult=${withAdult}`;
+  }
+
   const targetUrl = baseUrl + searchPath;
   const cacheKey = targetUrl;
   const cached = getCache(searchCache, cacheKey);
@@ -767,9 +790,9 @@ function torznabCapsXml() {
   <server title="EXT Torznab Proxy" version="${APP_VERSION}" />
   <limits max="100" default="50" />
   <searching>
-    <search available="yes" supportedParams="q" />
-    <movie-search available="yes" supportedParams="q" />
-    <tv-search available="yes" supportedParams="q,season,ep" />
+    <search available="yes" supportedParams="q,imdbid" />
+    <movie-search available="yes" supportedParams="q,imdbid" />
+    <tv-search available="yes" supportedParams="q,imdbid,season,ep" />
   </searching>
   <categories>
     <category id="2000" name="Movies" />
@@ -784,7 +807,7 @@ function torznabErrorXml(code, description) {
 <error code="${xmlEscape(code)}" description="${xmlEscape(description)}" />`;
 }
 
-function torznabResultsXml(items) {
+function torznabResultsXml(items, imdbId = "") {
   const itemXml = items.map(item => {
     const peers = item.seeders + item.leechers;
 
@@ -801,6 +824,7 @@ function torznabResultsXml(items) {
       <torznab:attr name="seeders" value="${xmlEscape(item.seeders)}" />
       <torznab:attr name="peers" value="${xmlEscape(peers)}" />
       <torznab:attr name="grabs" value="0" />
+      ${imdbId ? `<torznab:attr name="imdbid" value="${xmlEscape(imdbId)}" />` : ""}
     </item>`;
   }).join("\n");
 
@@ -833,11 +857,27 @@ async function handleApi(req, res, u) {
 
   if (t === "search" || t === "movie" || t === "tvsearch") {
     try {
-      const q = buildSearchQuery(u.searchParams);
-      const html = await fetchBrowse(q);
+      let imdbId = u.searchParams.get("imdbid") || u.searchParams.get("imdb_id") || "";
+      let q = u.searchParams.get("q") || "";
+
+      // Prowlarr can pass IMDb IDs as a special query token.
+      if (!imdbId) {
+        const match = q.match(/^\\{ImdbId:(tt\\d{5,12})\\}$/i);
+        if (match) {
+          imdbId = match[1];
+          q = "";
+        }
+      }
+
+      if (imdbId) {
+        imdbId = normalizeImdbId(imdbId);
+      }
+
+      const searchQuery = imdbId ? "" : buildSearchQuery(u.searchParams);
+      const html = await fetchBrowse(searchQuery, imdbId);
       const items = parseResults(html, req);
 
-      return send(res, 200, "application/rss+xml; charset=utf-8", torznabResultsXml(items));
+      return send(res, 200, "application/rss+xml; charset=utf-8", torznabResultsXml(items, imdbId));
     } catch (e) {
       error("[api]", e && e.stack ? e.stack : e);
       return send(res, 500, "application/xml; charset=utf-8", torznabErrorXml(900, String(e.message || e)));
