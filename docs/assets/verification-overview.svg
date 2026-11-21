@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="318" viewBox="0 0 1200 318" role="img" aria-labelledby="title description">
+<title id="title">EXT Torznab Proxy v1.0.5 verification results</title>
+<desc id="description">29 of 29 v1.0.5 unit and regression tests and live end-to-end acceptance across Prowlarr v3.0.2.5780, Sonarr v4.0.20.3014, and Radarr v7.0.3.10918 pass on Node 22+ with zero external runtime dependencies.</desc>
+<rect width="1200" height="318" rx="14" fill="#111619"/>
+<rect x=".5" y=".5" width="1199" height="317" rx="13.5" stroke="#353e42" fill="none"/>
+<circle cx="48" cy="52" r="16" fill="none" stroke="#10b981" stroke-width="2"/>
+<path d="M41 52l5 5 9-9" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<text x="76" y="46" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" fill="#f2f5f4">EXT TORZNAB PROXY</text>
+<text x="76" y="68" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">v1.0.5 Self-Hosted Torznab Gateway • Verified on Prowlarr v3.0.2.5780, Sonarr v4.0.20.3014 &amp; Radarr v7.0.3.10918</text>
+<path d="M36 91H1164" stroke="#353e42"/>
+<text x="40" y="138" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing=".8" fill="#a3b2ae">AUTOMATED TESTS</text>
+<text x="40" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">29<tspan font-size="25" font-weight="400" fill="#94a6a1"> / 29</tspan></text>
+<text x="40" y="242" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#72d9ad">PASS</text>
+<text x="40" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Unit &amp; regression (npm test)</text>
+<path d="M310 117v165" stroke="#353e42"/>
+<text x="330" y="138" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing=".8" fill="#a3b2ae">PROWLARR V3.0.2</text>
+<text x="330" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">3.0.2<tspan font-size="22" font-weight="400" fill="#94a6a1">.5780</tspan></text>
+<text x="330" y="242" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#72d9ad">VERIFIED</text>
+<text x="330" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Caps, pagination &amp; app sync</text>
+<path d="M600 117v165" stroke="#353e42"/>
+<text x="620" y="138" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing=".8" fill="#a3b2ae">SONARR V4 &amp; RADARR V7</text>
+<text x="620" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">100<tspan font-size="25" font-weight="400" fill="#94a6a1">%</tspan></text>
+<text x="620" y="242" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#72d9ad">COMPATIBLE</text>
+<text x="620" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Sonarr 4.0.20 &amp; Radarr 7.0.3</text>
+<path d="M890 117v165" stroke="#353e42"/>
+<text x="910" y="138" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing=".8" fill="#a3b2ae">RUNTIME &amp; AUDIT</text>
+<text x="910" y="206" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="55" font-weight="700" fill="#f2f5f4">0<tspan font-size="25" font-weight="400" fill="#94a6a1"> deps</tspan></text>
+<text x="910" y="242" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#72d9ad">CLEAN</text>
+<text x="910" y="271" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" fill="#94a6a1">Node.js 22+ stdlib, multi-arch</text>
+</svg>

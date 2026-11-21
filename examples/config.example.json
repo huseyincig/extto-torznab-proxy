@@ -15,5 +15,6 @@
   "magnetTtlMinutes": 1440,
   "maxSearchCacheItems": 100,
   "maxMagnetCacheItems": 1000,
-  "stripSeasonFromSearch": true
+  "stripSeasonFromSearch": true,
+  "enableImdbSearch": true
 }

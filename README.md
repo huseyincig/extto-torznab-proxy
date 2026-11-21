@@ -1,26 +1,67 @@
-# EXT Torznab Proxy
+# 🌐 EXT Torznab Proxy
 
-EXT Torznab Proxy is a self-hosted Generic Torznab gateway for EXT-style torrent search pages.
+[![Release](https://img.shields.io/github/v/release/huseyincig/extto-torznab-proxy?color=3b82f6&logo=github&logoColor=white)](https://github.com/huseyincig/extto-torznab-proxy/releases)
+[![GHCR Image](https://img.shields.io/badge/GHCR-ghcr.io%2Fhuseyincig%2Fextto--torznab--proxy-2496ed?logo=docker&logoColor=white)](https://github.com/huseyincig/extto-torznab-proxy/pkgs/container/extto-torznab-proxy)
+[![Prowlarr: v3.0.2.5780 Verified](https://img.shields.io/badge/Prowlarr-v3.0.2.5780%20verified-10b981?logo=checkmarx&logoColor=white)](#-verification--live-arr-stack-acceptance)
+[![Sonarr: v4.0.20.3014 Verified](https://img.shields.io/badge/Sonarr-v4.0.20.3014%20verified-10b981?logo=sonarr&logoColor=white)](#-verification--live-arr-stack-acceptance)
+[![Radarr: v7.0.3.10918 Verified](https://img.shields.io/badge/Radarr-v7.0.3.10918%20verified-10b981?logo=radarr&logoColor=white)](#-verification--live-arr-stack-acceptance)
+[![Tests: 29/29 Passing](https://img.shields.io/badge/Tests-29%2F29%20Passing-339933?logo=githubactions&logoColor=white)](test/server.test.js)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)](package.json)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-It is designed for Prowlarr and uses FlareSolverr internally for Cloudflare/session handling. Users do not need to copy custom Prowlarr definition YAML files. Add it to Prowlarr as a Generic Torznab indexer.
+[Verification & Compatibility](#-verification--live-arr-stack-acceptance) · [Key Highlights](#-key-highlights) · [Deployment (Docker Compose)](#-deployment-docker-compose) · [Prowlarr, Sonarr & Radarr Setup](#-prowlarr-sonarr--radarr-setup) · [Architecture & Search Lifecycle](#-architecture--hybrid-imdb-search-lifecycle) · [Web UI & Configuration](#️-web-ui--configuration) · [HTTP & Torznab Endpoints](#-http--torznab-endpoints) · [Validation & Testing](#-validation--testing)
 
-## Features
+A high-performance, zero-dependency, self-hosted **Generic Torznab** gateway for EXT-style torrent search pages (`extranet.torrentbay.st`, `ext.to`), purpose-built for the **\*arr stack** (**Prowlarr**, **Sonarr**, and **Radarr**).
 
-- Generic Torznab API for Prowlarr
-- IMDb ID (`imdbid`) search support for Sonarr and Radarr (`movie-search` and `tv-search`)
-- FlareSolverr session handling
-- Internal warm timer
-- Search result cache
-- Magnet cache
-- Direct magnet resolving from torrent detail pages
-- Web configuration page
-- Turkish/English UI based on browser language
-- Docker healthcheck endpoint
-- Support for alternate base domains:
-  - `https://extranet.torrentbay.st`
-  - `https://ext.to`
+**EXT Torznab Proxy** manages persistent **FlareSolverr** sessions and Cloudflare warm cycles internally, translates \*arr queries (including hybrid **IMDb ID + title resolution**, **Full Season Packs**, **Daily Series**, and **Anime**), resolves magnets on-demand at download time, and exposes a native Generic Torznab feed—requiring **zero custom Prowlarr YAML definition files**.
 
-## Docker Compose
+---
+
+## 📊 Verification & Live \*arr Stack Acceptance
+
+![Verification and live *arr stack acceptance results](docs/assets/verification-overview.svg)
+
+> EXT Torznab Proxy **v1.0.5** was verified on **21 November 2026** against a live **\*arr stack** (**Prowlarr `v3.0.2.5780`**, **Sonarr `v4.0.20.3014`**, and **Radarr `v7.0.3.10918`**) running on **Node.js `22+`**.
+
+- **Automated Unit & Regression Suite:** **29 / 29** tests passing (`npm test`), covering Torznab `<caps>`, hybrid IMDb + title search merging, unclassified (`7000`) category resolution, pagination (`offset`/`limit`), season-to-episode token upgrading, daily series formatting (`YYYY.MM.DD`), audio/codec dot preservation (`DDP5.1`, `7.1`, `H.264`, `H.265`), RFC 7230 magnet `Location` header normalization, and FlareSolverr error diagnostics.
+- **Live Prowlarr, Sonarr & Radarr Acceptance:** End-to-end indexer synchronization, interactive season/episode searches, full season pack matching (`S01` and `"Season 1 Complete"`), and multi-quality movie searches verified against live Prowlarr, Sonarr, and Radarr instances.
+- **Zero External Runtime Dependencies:** Built strictly on the Node.js `>=22` standard library (`http`, `crypto`, `fs`, native `fetch`) and packaged as a lightweight multi-arch (`linux/amd64`, `linux/arm64`) Alpine Docker image.
+
+### Verified \*arr Stack Compatibility Matrix
+
+| Component | Verified Version | Runtime | Verified Integration & Capabilities |
+| :--- | :---: | :---: | :--- |
+| **Prowlarr** | `v3.0.2.5780` | `.NET 10.0.15` | `Generic Torznab` indexer validation, `<limits max="100" default="100" />` single-page sync, category mapping (`2000`, `5000`, `5070`), unclassified (`7000`) category resolution (`ReleaseSearchService.cs:222` pass-through), and full App Sync to Sonarr & Radarr. |
+| **Sonarr** | `v4.0.20.3014` | `.NET 6.0.13` | Tier 0 `imdbid` + `season`/`ep` (`SxxExx`) searches, hybrid IMDb title resolution + text search merging, `"Season X Complete"` & `Sxx` Full Season Pack detection, Special (`S00Exx`) & Daily (`YYYY.MM.DD`) episode searches. |
+| **Radarr** | `v7.0.3.10918` | `.NET 10.0.15` | `t=movie&imdbid=tt...` hybrid IMDb + resolved `"Title Year"` search merging, year-disambiguated release matching, and multi-quality codec/audio tag parsing (`2160p REMUX`, `TrueHD 7.1`, `DDP5.1`, `H.264`, `H.265`). |
+| **FlareSolverr** | `v3.3.21+` / `latest` | Chromium / Python | Persistent session (`sessions.create`), mutex-serialized request queue (`withFsLock`), automatic session recreation on expiry, and background Cloudflare warm timer. |
+
+See the [1.0.5 release notes](CHANGELOG.md) for the Hybrid IMDb + Title search architecture, Prowlarr `7000` category resolution, pagination hardening, and Web UI controls.
+
+---
+
+## ✨ Key Highlights
+
+- **Zero-YAML Generic Torznab Integration:** Adds directly to **Prowlarr** (or straight to **Sonarr** / **Radarr**) as a standard `Generic Torznab` indexer. No custom Cardigann YAML definitions or Prowlarr FlareSolverr proxy tags required.
+- **Hybrid IMDb ID (`imdbid`) + Title Search Engine:**
+  - When `enableImdbSearch` is enabled (default: `true`), advertises `supportedParams="q,imdbid"` for `movie-search` and `supportedParams="q,season,ep,imdbid"` for `tv-search`.
+  - Prevents the **Sonarr/Radarr Tier 0 trap** (`if (releases.Any()) break;`): when Sonarr or Radarr queries by `imdbid` without `q` (title), the proxy automatically queries `imdb_id=tt...`, fetches full season packs without `q=Sxx` for season queries, resolves the official title/year from the IMDb ID (cached for 24 hours), runs a complementary title search, and merges all unique results by torrent ID.
+  - Attaches `<torznab:attr name="imdb">` and `<torznab:attr name="imdbid">` strictly to items verified by the `imdb_id` query so Sonarr and Radarr perform natural title validation on merged text-search items.
+- **Prowlarr-Safe Unclassified (`7000`) Category Resolution:** Automatically maps rows on EXT that lack an explicit `/movies/`, `/tv/`, or `/anime/` anchor (`7000`) to the appropriate advertised Torznab category (`2000` Movies, `5000` TV, or `5070` Anime) based on request context and title heuristics (`S01`, `Season 1`, `S01E01`), ensuring Prowlarr's `ReleaseSearchService.cs` never drops valid results during category-filtered searches.
+- **Smart TV, Season Pack & Daily Episode Normalization:**
+  - Converts `"Season 2 Episode 4"`, `"Season 2 Ep 4"`, `"S2E4"` $\rightarrow$ `"S02E04"` and `"Season 2"` $\rightarrow$ `"S02"`.
+  - Upgrades season-only tokens in `q` (`Season 2` / `S02`) to `S02E04` when both `season` and `ep` query parameters are supplied.
+  - Formats Sonarr daily series queries (`season=2026&ep=11/18`) into standard `2026.11.18` tokens.
+- **Codec, Audio Channel & Date Dot Preservation:** Preserves release-critical dots in audio channel tags (`5.1`, `7.1`, `2.0`, `DDP5.1`, `AAC2.0`, `DD+5.1`), video codecs (`H.264`, `H.265`), and daily dates (`YYYY.MM.DD`) during title normalization so Sonarr/Radarr custom formats and quality profiles score releases accurately.
+- **On-Demand Magnet Resolution & RFC 7230 Header Safety:** Search queries only parse the lightweight `/browse/` HTML table. Detail-page token extraction (`pageToken`, `csrfToken`, HMAC-SHA256) and `/ajax/getTorrentMagnet.php` resolution execute **only** when a release is actually grabbed (`/download`), returning an RFC 7230-compliant `302 Location: magnet:?...` redirect sanitized by `normalizeMagnet()`.
+- **Mutex-Serialized FlareSolverr Session & Auto-Warmer:** Queues concurrent FlareSolverr calls behind an internal lock (`withFsLock`) to prevent Chromium tab stampedes during multi-season searches, while a configurable background warm timer keeps the Cloudflare clearance cookie (`cf_clearance`) hot.
+- **Auto-Detected Bilingual Web UI (TR / EN):** Built-in responsive dashboard at `http://YOUR_HOST_IP:8998/` automatically adapts to your browser's language (`Accept-Language` / `navigator.language`, Turkish or English) with live warm telemetry, one-click API key copy/regeneration, cache clearing, session reset, and instant settings persistence.
+
+---
+
+## 📦 Deployment (Docker Compose)
+
+Create a `docker-compose.yml` file to deploy **EXT Torznab Proxy** alongside **FlareSolverr**:
 
 ```yaml
 services:
@@ -59,91 +100,210 @@ services:
         max-file: "3"
 ```
 
-For a pinned version, use:
+Start the stack:
 
-```yaml
-image: ghcr.io/huseyincig/extto-torznab-proxy:1.0.4
+```bash
+docker compose up -d
 ```
 
-## Web UI
+For a pinned release version, use:
 
-Open:
+```yaml
+image: ghcr.io/huseyincig/extto-torznab-proxy:1.0.5
+```
+
+> [!IMPORTANT]
+> The container automatically generates `/config/config.json` with a random 192-bit API key on first startup. Do **not** commit `/config/config.json` to a public repository.
+
+---
+
+## 🔌 Prowlarr, Sonarr & Radarr Setup
+
+### 1. Adding to Prowlarr (`v3.0.2+` — Recommended)
+
+In Prowlarr, navigate to **Indexers $\rightarrow$ Add Indexer** and select **Generic Torznab**:
+
+| Field | Value | Notes |
+| :--- | :--- | :--- |
+| **Name** | `EXT Torznab Proxy` | Or any custom name |
+| **Enable** | `Yes` (Checked) | Enables RSS, Automatic, and Interactive Search |
+| **Redirect** | `No` (Unchecked) | Leave disabled; `/download` handles `302` magnet redirects |
+| **URL** | `http://YOUR_HOST_IP:8998` | Or `http://extto-torznab-proxy:8998` if on the same Docker network |
+| **API Path** | `/api` | Default Torznab API path |
+| **API Key** | *(Copy from Web UI)* | Shown at `http://YOUR_HOST_IP:8998/` |
+| **Categories** | `Movies (2000)`, `TV (5000)`, `Anime (5070)` | Auto-discovered from `/api?t=caps` |
+| **Tags** | *(Leave empty)* | **Do NOT** assign a Prowlarr FlareSolverr proxy tag |
+
+> [!WARNING]
+> **Do not** attach a FlareSolverr Indexer Proxy tag to this indexer in Prowlarr. **EXT Torznab Proxy** communicates with FlareSolverr directly and manages its own persistent browser session.
+
+### 2. Synchronizing with Sonarr (`v4+`) & Radarr (`v7+`)
+
+When Prowlarr's **Settings $\rightarrow$ Apps** is configured with **Full Sync** for Sonarr and Radarr:
+- **Sonarr (`v4.0.20+`)** automatically receives categories `5000 (TV)` and `5070 (Anime)` along with `tv-search` (`q,season,ep,imdbid`).
+- **Radarr (`v7.0.3+`)** automatically receives category `2000 (Movies)` along with `movie-search` (`q,imdbid`).
+
+---
+
+## 🔄 Architecture & Hybrid IMDb Search Lifecycle
+
+```mermaid
+flowchart TD
+    Arr["Sonarr v4 / Radarr v7 / Prowlarr v3"] -->|"GET /api?t=tvsearch|movie|search"| Auth{"Valid API Key?"}
+    Auth -->|No| Err100["Return Torznab Error 100 (HTTP 403)"]
+    Auth -->|Yes| Mode{"Query contains imdbid?"}
+
+    Mode -->|No: Standard Text Query| TextFetch["Fetch /browse/?q=... via FlareSolverr / Cache"]
+    Mode -->|Yes: Hybrid IMDb Mode| ImdbPrimary["1. Fetch /browse/?q=SxxExx&imdb_id=tt..."]
+
+    ImdbPrimary --> SeasonCheck{"Season-only query (Sxx)?"}
+    SeasonCheck -->|Yes| ImdbPacks["2. Fetch /browse/?imdb_id=tt... (Catches 'Season X Complete' packs)"]
+    SeasonCheck -->|No| TitleCheck{"Caller omitted q (Title)?"}
+    ImdbPacks --> TitleCheck
+
+    TitleCheck -->|Yes: Tier 0 Query| ResolveTitle["3. Resolve Title & Year from IMDb ID (24h Cache)"]
+    ResolveTitle --> TitleFallback["4. Fetch /browse/?q=Title+Sxx (Catches unlinked uploads)"]
+    TitleCheck -->|No| Merge["Deduplicate & Merge by Torrent ID (mergeSearchItems)"]
+    TitleFallback --> Merge
+    TextFetch --> Filter
+
+    Merge --> Filter["Filter Explicit Category Mismatches (filterItemsByCategory)"]
+    Filter --> ResolveCat["Map Unclassified 7000 Rows to 2000/5000/5070 (resolveItemCategories)"]
+    ResolveCat --> Paginate["Apply Torznab offset & limit (paginateItems)"]
+    Paginate --> XmlOut["Return Torznab RSS 2.0 XML Feed"]
+
+    Arr -->|"GET /download?id=...&path=..."| MagCache{"Magnet in LRU Cache?"}
+    MagCache -->|Hit| Redirect302["HTTP 302 Location: magnet:?xt=urn:btih:..."]
+    MagCache -->|Miss| DetailFetch["Fetch Detail Page via FlareSolverr -> Extract pageToken & csrfToken"]
+    DetailFetch --> HmacPost["Compute HMAC-SHA256 & POST /ajax/getTorrentMagnet.php"]
+    HmacPost --> Sanitize["Sanitize URI via normalizeMagnet() & Store in Cache"]
+    Sanitize --> Redirect302
+```
+
+---
+
+## ⚙️ Web UI & Configuration
+
+Open the built-in management interface in your browser:
 
 ```text
 http://YOUR_HOST_IP:8998/
 ```
 
-Configure:
+The Web UI automatically detects your browser's language (**Turkish** or **English**) and provides live status cards (**Warm Status**, **Last Warm Age**, **Last Warm Duration**, **Search Cache Count**, **Magnet Cache Count**), quick action buttons (**Run Warm**, **Clear Cache**, **Reset Session**, **Health JSON**, **Caps XML**), and persistent configuration controls.
 
-- Base URL
-- Public URL
-- FlareSolverr URL
-- API key
-- Warm interval
-- Cache TTLs
-- Session options
+### `/config/config.json` Reference
 
-The app creates `/config/config.json` automatically on first start. Do not commit that file to a public repository because it contains your API key and local settings.
-
-## Prowlarr setup
-
-In Prowlarr:
-
-```text
-Add Indexer -> Generic Torznab
+```json
+{
+  "baseUrl": "https://extranet.torrentbay.st",
+  "publicUrl": "http://YOUR_HOST_IP:8998",
+  "flaresolverrUrl": "http://flaresolverr:8191/v1",
+  "sessionName": "extto_persistent",
+  "apiKey": "change-me",
+  "withAdult": true,
+  "warmEnabled": true,
+  "warmQuery": "warm",
+  "warmIntervalMinutes": 10,
+  "coldThresholdSeconds": 30,
+  "requestTimeoutMs": 120000,
+  "idleTimeoutMinutes": 360,
+  "searchTtlSeconds": 180,
+  "magnetTtlMinutes": 1440,
+  "maxSearchCacheItems": 100,
+  "maxMagnetCacheItems": 1000,
+  "stripSeasonFromSearch": true,
+  "enableImdbSearch": true
+}
 ```
 
-Use:
+### 🎛️ Configuration Options
 
-```text
-URL: http://YOUR_HOST_IP:8998
-API Path: /api
-API Key: shown on the web UI
-Redirect: disabled
-Tags: optional, for example extto
+| Setting | Default | Description |
+| :--- | :---: | :--- |
+| `baseUrl` | `"https://extranet.torrentbay.st"` | Target EXT mirror domain (`https://extranet.torrentbay.st`, `https://ext.to`, etc.). |
+| `publicUrl` | `""` | External base URL (`http://YOUR_HOST_IP:8998`) used to construct `<link>` and `<enclosure>` `/download` URLs in Torznab XML. Falls back to the incoming `Host` header if empty. |
+| `flaresolverrUrl` | `"http://flaresolverr:8191/v1"` | FlareSolverr `/v1` API endpoint. |
+| `sessionName` | `"extto_persistent"` | Persistent FlareSolverr browser session identifier. |
+| `apiKey` | *(Auto-generated)* | Torznab API key required by `/api` requests (`?apikey=...`). Can be copied or regenerated instantly from the Web UI. |
+| `enableImdbSearch` | `true` | Advertises `imdbid` in `/api?t=caps` (`movie-search` and `tv-search`) and enables the Hybrid IMDb + Title search engine. |
+| `stripSeasonFromSearch` | `true` | Normalizes verbose TV queries (`"Season 2 Ep 4"` $\rightarrow$ `"S02E04"`, `"Season 2"` $\rightarrow$ `"S02"`) and strips colons for optimal EXT search matching. |
+| `withAdult` | `true` | Appends `with_adult=1` (`true`) or `with_adult=0` (`false`) to upstream `/browse/` requests. |
+| `warmEnabled` | `true` | Enables periodic background warming to keep the Cloudflare session active. |
+| `warmQuery` | `"warm"` | Fallback search term used by the warm timer and empty queries. |
+| `warmIntervalMinutes` | `10` | Interval in minutes between background warm runs (`1`–`1440`). |
+| `coldThresholdSeconds` | `30` | Duration threshold in seconds above which a warm run is reported as `COLD_OR_CHALLENGE`. |
+| `requestTimeoutMs` | `120000` | Maximum timeout in milliseconds for FlareSolverr and upstream magnet AJAX calls (`15000`–`300000`). |
+| `idleTimeoutMinutes` | `360` | Destroys and recycles the persistent FlareSolverr session after this many minutes of inactivity (`5`–`10080`). |
+| `searchTtlSeconds` | `180` | TTL in seconds for cached `/browse/` HTML responses (`10`–`86400`). |
+| `magnetTtlMinutes` | `1440` | TTL in minutes for cached resolved magnet URIs (`1`–`43200`). |
+| `maxSearchCacheItems` | `100` | Maximum LRU entries in the search HTML cache (`10`–`5000`). |
+| `maxMagnetCacheItems` | `1000` | Maximum LRU entries in the resolved magnet cache (`10`–`50000`). |
+
+---
+
+## 🌐 HTTP & Torznab Endpoints
+
+| Endpoint | Method | Purpose |
+| :--- | :---: | :--- |
+| `/` | `GET` | Bilingual (TR/EN) Web UI dashboard and settings form |
+| `/settings` | `POST` | Saves configuration changes from the Web UI |
+| `/api-key/regenerate` | `POST` | Generates and persists a new random 192-bit API key immediately |
+| `/health` | `GET` | JSON health, session, cache, and warm telemetry endpoint (Docker `HEALTHCHECK` target) |
+| `/warm` | `GET` / `POST` | Triggers an immediate Cloudflare warm run (bypasses local search cache) |
+| `/cache/clear` | `GET` / `POST` | Clears both in-memory search HTML and magnet LRU caches |
+| `/session/reset` | `GET` / `POST` | Destroys and recreates the persistent FlareSolverr session |
+| `/api?t=caps` | `GET` | Torznab capabilities XML (`limits`, `searching`, `categories`) |
+| `/api?t=search&q=...` | `GET` | General Torznab search (`cat`, `offset`, `limit`, `apikey`) |
+| `/api?t=tvsearch&...` | `GET` | Torznab TV search (`q`, `season`, `ep`, `imdbid`, `cat`, `offset`, `limit`, `apikey`) |
+| `/api?t=movie&...` | `GET` | Torznab Movie search (`q`, `imdbid`, `cat`, `offset`, `limit`, `apikey`) |
+| `/download?id=...&path=...` | `GET` | Resolves the torrent's magnet URI on-demand and returns an `HTTP 302` redirect |
+
+---
+
+## 🧪 Validation & Testing
+
+Run the automated test suite locally (requires Node.js `>=22`):
+
+```bash
+npm test
 ```
 
-Do not assign a FlareSolverr indexer proxy tag to this Generic Torznab indexer. This container handles FlareSolverr itself.
+Build the container image locally:
 
-## Important endpoints
-
-```text
-/                 Web UI
-/health           Health JSON and Docker healthcheck target
-/warm             Manual warm
-/cache/clear      Clear search and magnet cache
-/session/reset    Reset FlareSolverr session
-/api?t=caps       Torznab capabilities
-/api?t=search     Torznab search
-/download         Magnet redirect endpoint
-```
-
-## Notes
-
-- Warm keeps the Cloudflare session active.
-- Search cache and magnet cache are separate.
-- Magnet resolving is done only when a result is downloaded. Resolved magnets are cached.
-- If you change Base URL, it is recommended to clear cache, reset session, and run warm again.
-- The app image is published as `ghcr.io/huseyincig/extto-torznab-proxy:latest`.
-
-## Build locally
-
-```sh
+```bash
 docker build -t extto-torznab-proxy:latest .
 ```
 
-## Publish
+### Publishing Multi-Arch Images (GHCR)
 
-This repository includes a GitHub Actions workflow that publishes multi-arch images to GitHub Container Registry:
+This repository includes GitHub Actions workflows (`.github/workflows/docker-image.yml` and `.github/workflows/docker-publish.yml`) that run the unit test suite and publish multi-architecture (`linux/amd64`, `linux/arm64`) images to GitHub Container Registry:
 
 ```text
 ghcr.io/huseyincig/extto-torznab-proxy:latest
-ghcr.io/huseyincig/extto-torznab-proxy:1.0.4
+ghcr.io/huseyincig/extto-torznab-proxy:1.0.5
 ```
 
-Push a release tag to publish a versioned image:
+Push a version tag to trigger a release build:
 
-```sh
-git tag v1.0.4
-git push origin v1.0.4
+```bash
+git tag v1.0.5
+git push origin v1.0.5
 ```
+
+---
+
+## 🏗️ Project Layout
+
+- `server.js`: Zero-dependency HTTP server, Torznab XML generator, Hybrid IMDb + Title search engine, HTML result parser, HMAC magnet resolver, FlareSolverr mutex queue, warm scheduler, and bilingual (TR/EN) Web UI.
+- `test/server.test.js`: Unit and regression test suite covering Torznab `<caps>`, hybrid IMDb search, category filtering & `7000` resolution, pagination, date/size/title normalization, and FlareSolverr diagnostics.
+- `test/normalize-magnet.test.js`: RFC 7230 `Location` header safety and magnet URI normalization test suite.
+- `examples/docker-compose.yml`: Production-ready Docker Compose stack with FlareSolverr and healthcheck configuration.
+- `examples/config.example.json`: Reference configuration template with default values.
+- `docs/assets/verification-overview.svg`: Automated and live \*arr stack verification overview card.
+
+---
+
+## 📄 License
+
+MIT © [Hüseyin Hadi Çığ](https://github.com/huseyincig)

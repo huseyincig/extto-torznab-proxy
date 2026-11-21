@@ -4,8 +4,8 @@ const http = require("node:http");
 
 const srv = require("../server.js");
 
-test("APP_VERSION is 1.0.4", () => {
-  assert.equal(srv.APP_VERSION, "1.0.4");
+test("APP_VERSION is 1.0.5", () => {
+  assert.equal(srv.APP_VERSION, "1.0.5");
 });
 
 test("parseDateToRfc822: parses relative ages accurately instead of current time or year 2001", () => {
@@ -39,14 +39,25 @@ test("xmlEscape: strips XML 1.0 invalid control characters", () => {
   assert.equal(escaped, "BadTitle &amp; &lt;Test&gt;");
 });
 
-test("torznabCapsXml: exposes only Movies (2000), TV (5000), and Anime (5070) and advertises imdbid support", () => {
-  const xml = srv.torznabCapsXml();
-  assert.match(xml, /<category\s+id="2000"\s+name="Movies"\s*\/>/);
-  assert.match(xml, /<category\s+id="5000"\s+name="TV"\s*\/>/);
-  assert.match(xml, /<category\s+id="5070"\s+name="Anime"\s*\/>/);
-  assert.doesNotMatch(xml, /id="7000"/);
-  assert.match(xml, /<movie-search\s+available="yes"\s+supportedParams="q,imdbid"\s*\/>/);
-  assert.match(xml, /<tv-search\s+available="yes"\s+supportedParams="q,season,ep,imdbid"\s*\/>/);
+test("torznabCapsXml: exposes only Movies (2000), TV (5000), and Anime (5070) and respects enableImdbSearch toggle", () => {
+  const prev = srv.getConfig().enableImdbSearch;
+  try {
+    srv.setConfigForTest({ enableImdbSearch: true });
+    const xml = srv.torznabCapsXml();
+    assert.match(xml, /<category\s+id="2000"\s+name="Movies"\s*\/>/);
+    assert.match(xml, /<category\s+id="5000"\s+name="TV"\s*\/>/);
+    assert.match(xml, /<category\s+id="5070"\s+name="Anime"\s*\/>/);
+    assert.doesNotMatch(xml, /id="7000"/);
+    assert.match(xml, /<movie-search\s+available="yes"\s+supportedParams="q,imdbid"\s*\/>/);
+    assert.match(xml, /<tv-search\s+available="yes"\s+supportedParams="q,season,ep,imdbid"\s*\/>/);
+
+    srv.setConfigForTest({ enableImdbSearch: false });
+    const xmlDisabled = srv.torznabCapsXml();
+    assert.match(xmlDisabled, /<movie-search\s+available="yes"\s+supportedParams="q"\s*\/>/);
+    assert.match(xmlDisabled, /<tv-search\s+available="yes"\s+supportedParams="q,season,ep"\s*\/>/);
+  } finally {
+    srv.setConfigForTest({ enableImdbSearch: prev });
+  }
 });
 
 test("normalizeImdbId: normalizes tt-prefixed, unprefixed, and short IMDb IDs to tt + 7+ digits", () => {
@@ -210,3 +221,190 @@ test("setLimitedCache: does not evict other keys when updating an existing key",
   assert.equal(map.has("a"), true);
   assert.equal(map.has("b"), true);
 });
+
+test("torznabCapsXml: sets limits default=100 max=100 and paginateItems slices by offset and limit", () => {
+  const xml = srv.torznabCapsXml();
+  assert.match(xml, /<limits\s+max="100"\s+default="100"\s*\/>/);
+
+  const items = Array.from({ length: 25 }, (_, i) => ({ id: String(i + 1) }));
+  const page1 = srv.paginateItems(items, new URLSearchParams("offset=0&limit=10"));
+  assert.equal(page1.length, 10);
+  assert.equal(page1[0].id, "1");
+  assert.equal(page1[9].id, "10");
+
+  const page2 = srv.paginateItems(items, new URLSearchParams("offset=20&limit=10"));
+  assert.equal(page2.length, 5);
+  assert.equal(page2[0].id, "21");
+
+  const page3 = srv.paginateItems(items, new URLSearchParams("offset=50&limit=50"));
+  assert.equal(page3.length, 0);
+});
+
+test("buildSearchQuery: upgrades season-only token in q to SxxExx when season and ep params are provided", () => {
+  const params = new URLSearchParams("t=tvsearch&q=Show+Season+2&season=2&ep=4");
+  assert.equal(srv.buildSearchQuery(params), "Show S02E04");
+
+  const prev = srv.getConfig().stripSeasonFromSearch;
+  try {
+    srv.setConfigForTest({ stripSeasonFromSearch: false });
+    assert.equal(srv.buildSearchQuery(params), "Show Season 2 S02E04");
+  } finally {
+    srv.setConfigForTest({ stripSeasonFromSearch: prev });
+  }
+});
+
+test("buildSearchQuery: formats Sonarr daily episode season=YYYY and ep=MM/DD into YYYY.MM.DD", () => {
+  const dailyParams = new URLSearchParams("t=tvsearch&q=The+Daily+Show&season=2026&ep=11/18");
+  assert.equal(srv.buildSearchQuery(dailyParams), "The Daily Show 2026.11.18");
+
+  const dailyImdbParams = new URLSearchParams("t=tvsearch&imdbid=tt0115147&season=2026&ep=03/05");
+  assert.equal(srv.buildSearchQuery(dailyImdbParams), "2026.03.05");
+});
+
+test("parseResults and filterItemsByCategory: preserves unclassified (7000) rows for Prowlarr pass-through while filtering explicit 2000/5000/5070 mismatches", () => {
+  const html = `<table class="search-table">
+    <tr>
+      <td><a class="torrent-title-link" href="/movies/life-2009-101/">Life.2009.1080p.BluRay</a><a href="/movies/">Movies</a></td>
+      <td>4.2 GB</td><td>-</td><td>1 day</td><td>50</td><td>5</td>
+    </tr>
+    <tr>
+      <td><a class="torrent-title-link" href="/tv/life-s01e01-102/">Life.2009.S01E01.1080p.WEB-DL</a><a href="/tv/">TV</a></td>
+      <td>1.8 GB</td><td>-</td><td>2 days</td><td>30</td><td>3</td>
+    </tr>
+    <tr>
+      <td><a class="torrent-title-link" href="/anime/life-anime-103/">Life.Anime.01.1080p</a><a href="/anime/">Anime</a></td>
+      <td>900 MB</td><td>-</td><td>3 days</td><td>20</td><td>2</td>
+    </tr>
+    <tr>
+      <td><a class="torrent-title-link" href="/life-s01-complete-104/">Life.S01.COMPLETE.1080p.BluRay</a></td>
+      <td>15 GB</td><td>-</td><td>4 days</td><td>10</td><td>1</td>
+    </tr>
+  </table>`;
+
+  const allItems = srv.parseResults(html, { headers: { host: "localhost:8998" } });
+  assert.equal(allItems.length, 4);
+  assert.deepEqual(allItems.map((x) => x.category), [2000, 5000, 5070, 7000]);
+
+  const moviesOnly = srv.filterItemsByCategory(allItems, "2000,2040");
+  assert.deepEqual(moviesOnly.map((x) => x.id), ["101", "104"]);
+
+  const tvOnly = srv.filterItemsByCategory(allItems, "5000,5040");
+  assert.deepEqual(tvOnly.map((x) => x.id), ["102", "104"]);
+
+  const animeOnly = srv.filterItemsByCategory(allItems, "5070");
+  assert.deepEqual(animeOnly.map((x) => x.id), ["103", "104"]);
+
+  const tvAndAnime = srv.filterItemsByCategory(allItems, "5000,5070");
+  assert.deepEqual(tvAndAnime.map((x) => x.id), ["102", "103", "104"]);
+});
+
+test("mergeSearchItems: deduplicates items by id and preserves item-level imdbId only on IMDb-verified results", () => {
+  const imdbItems = [
+    {
+      id: "1001",
+      title: "Breaking Bad S01E01 1080p",
+      downloadUrl: "http://localhost:8998/download?id=1001&path=%2Fbb-1001%2F",
+      commentsUrl: "https://extranet.torrentbay.st/bb-1001/",
+      pubDate: "Wed, 18 Nov 2026 12:00:00 GMT",
+      category: 5000,
+      size: 1024,
+      seeders: 50,
+      leechers: 5,
+      imdbId: "tt0903747"
+    }
+  ];
+  const textItems = [
+    {
+      id: "1001",
+      title: "Breaking Bad S01E01 1080p",
+      downloadUrl: "http://localhost:8998/download?id=1001&path=%2Fbb-1001%2F",
+      commentsUrl: "https://extranet.torrentbay.st/bb-1001/",
+      pubDate: "Wed, 18 Nov 2026 12:00:00 GMT",
+      category: 5000,
+      size: 1024,
+      seeders: 50,
+      leechers: 5
+    },
+    {
+      id: "1002",
+      title: "Breaking Bad Season 1 Complete 1080p BluRay",
+      downloadUrl: "http://localhost:8998/download?id=1002&path=%2Fbb-1002%2F",
+      commentsUrl: "https://extranet.torrentbay.st/bb-1002/",
+      pubDate: "Wed, 18 Nov 2026 12:00:00 GMT",
+      category: 7000,
+      size: 2048,
+      seeders: 100,
+      leechers: 10
+    }
+  ];
+
+  const merged = srv.mergeSearchItems(imdbItems, textItems);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].id, "1001");
+  assert.equal(merged[0].imdbId, "tt0903747");
+  assert.equal(merged[1].id, "1002");
+  assert.equal(merged[1].imdbId, undefined);
+
+  const xml = srv.torznabResultsXml(merged);
+  // Item 1001 has imdb attributes; item 1002 does not force imdb attribute
+  const itemMatches = xml.match(/<item>[\s\S]*?<\/item>/g);
+  assert.equal(itemMatches.length, 2);
+  assert.match(itemMatches[0], /name="imdb"\s+value="0903747"/);
+  assert.doesNotMatch(itemMatches[1], /name="imdb"/);
+});
+
+test("normalizeTitle: preserves audio channels (5.1, 7.1, 2.0), video codecs (H.264, H.265), and daily dates (YYYY.MM.DD)", () => {
+  assert.equal(
+    srv.normalizeTitle("Movie.Name.2026.1080p.WEB-DL.DDP5.1.Atmos.7.1.AAC2.0.H.264-GROUP"),
+    "Movie Name 2026 1080p WEB-DL DDP5.1 Atmos 7.1 AAC2.0 H.264-GROUP"
+  );
+  assert.equal(
+    srv.normalizeTitle("Daily.Show.2026.11.18.720p.WEB.H.265-GRP"),
+    "Daily Show 2026.11.18 720p WEB H.265-GRP"
+  );
+});
+
+test("torznabResultsXml: includes downloadvolumefactor=0 and uploadvolumefactor=1 for public tracker freeleech compatibility", () => {
+  const items = [
+    {
+      id: "101",
+      title: "Movie Name 2026 1080p",
+      downloadUrl: "http://localhost:8998/download?id=101&path=%2Fmovie-101%2F",
+      commentsUrl: "https://extranet.torrentbay.st/movie-101/",
+      pubDate: "Wed, 18 Nov 2026 12:00:00 GMT",
+      category: 2000,
+      size: 1024,
+      seeders: 10,
+      leechers: 2
+    }
+  ];
+
+  const xml = srv.torznabResultsXml(items);
+  assert.match(xml, /<torznab:attr\s+name="downloadvolumefactor"\s+value="0"\s*\/>/);
+  assert.match(xml, /<torznab:attr\s+name="uploadvolumefactor"\s+value="1"\s*\/>/);
+});
+
+test("resolveItemCategories: maps unclassified (7000) items to advertised categories (2000/5000/5070) so Prowlarr does not drop them", () => {
+  const rawItems = [
+    { id: "1", title: "Breaking Bad Season 1 COMPLETE 1080p BluRay x265-PSA", category: 7000 },
+    { id: "2", title: "Dune Part Two 2024 1080p BluRay x264", category: 7000 },
+    { id: "3", title: "Explicit TV Item", category: 5000 }
+  ];
+
+  // When Sonarr queries cat=5000 (tvsearch)
+  const tvResolved = srv.resolveItemCategories(rawItems, "5000", "tvsearch");
+  assert.deepEqual(tvResolved.map((x) => x.category), [5000, 5000, 5000]);
+
+  // When Radarr queries cat=2000 (movie)
+  const movieResolved = srv.resolveItemCategories(rawItems, "2000", "movie");
+  assert.deepEqual(movieResolved.map((x) => x.category), [2000, 2000, 5000]);
+
+  // When Anime queries cat=5070
+  const animeResolved = srv.resolveItemCategories(rawItems, "5070", "tvsearch");
+  assert.deepEqual(animeResolved.map((x) => x.category), [5070, 5070, 5000]);
+
+  // When general search (no single category filter) uses title heuristics
+  const generalResolved = srv.resolveItemCategories(rawItems, "2000,5000,5070", "search");
+  assert.deepEqual(generalResolved.map((x) => x.category), [5000, 2000, 5000]);
+});
+

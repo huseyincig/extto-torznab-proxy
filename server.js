@@ -4,7 +4,7 @@ const path = require("path");
 const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || "8998");
-const APP_VERSION = "1.0.4";
+const APP_VERSION = "1.0.5";
 const CONFIG_DIR = process.env.CONFIG_DIR || "/config";
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
@@ -25,7 +25,8 @@ const DEFAULT_CONFIG = {
   magnetTtlMinutes: 1440,
   maxSearchCacheItems: 100,
   maxMagnetCacheItems: 1000,
-  stripSeasonFromSearch: true
+  stripSeasonFromSearch: true,
+  enableImdbSearch: true
 };
 
 let config = { ...DEFAULT_CONFIG };
@@ -44,6 +45,7 @@ let timersStarted = false;
 
 const searchCache = new Map();
 const magnetCache = new Map();
+const imdbTitleCache = new Map();
 
 let sessionQueue = Promise.resolve();
 let fsQueue = Promise.resolve();
@@ -427,8 +429,23 @@ function padNumberText(value, width) {
 }
 
 function buildTvToken(params) {
-  const season = padNumberText(params.get("season"), 2);
-  const ep = padNumberText(params.get("ep") || params.get("episode"), 2);
+  const rawSeason = String(params.get("season") || "").trim();
+  const rawEp = String(params.get("ep") || params.get("episode") || "").trim();
+
+  if (/^(?:19|20)\d{2}$/.test(rawSeason)) {
+    const dailyMatch = rawEp.match(/^(\d{1,2})[/. -](\d{1,2})$/);
+    if (dailyMatch) {
+      const mm = String(dailyMatch[1]).padStart(2, "0");
+      const dd = String(dailyMatch[2]).padStart(2, "0");
+      return `${rawSeason}.${mm}.${dd}`;
+    }
+    if (!rawEp) {
+      return rawSeason;
+    }
+  }
+
+  const season = padNumberText(rawSeason, 2);
+  const ep = padNumberText(rawEp, 2);
 
   if (season && ep) {
     return `S${season}E${ep}`;
@@ -466,7 +483,11 @@ function normalizeSearchQueryText(q) {
 }
 
 function queryHasTvToken(q) {
-  return /\bS\d{2}(?:E\d{2,3})?\b/i.test(String(q || ""));
+  return /\b(?:S\d{2}(?:E\d{2,3})?|(?:19|20)\d{2}\.\d{2}\.\d{2})\b/i.test(String(q || ""));
+}
+
+function queryHasEpisodeToken(q) {
+  return /\b(?:S\d{2}E\d{2,3}|(?:19|20)\d{2}\.\d{2}\.\d{2})\b/i.test(String(q || ""));
 }
 
 function normalizeImdbId(value) {
@@ -484,7 +505,8 @@ function normalizeImdbId(value) {
 
 function buildSearchQuery(params) {
   let q = params.get("q") || params.get("search") || "";
-  const imdbId = normalizeImdbId(params.get("imdbid") || params.get("imdb_id") || "");
+  const imdbEnabled = config.enableImdbSearch !== false;
+  const imdbId = imdbEnabled ? normalizeImdbId(params.get("imdbid") || params.get("imdb_id") || "") : "";
 
   if (!q && !imdbId) {
     q = config.warmQuery || "warm";
@@ -497,9 +519,20 @@ function buildSearchQuery(params) {
 
   // Prowlarr tvsearch may pass season/ep separately instead of embedding them in q.
   // Keep the season/episode token and normalize it into: "Title S02" or "Title S02E04".
-  if (tvToken && !queryHasTvToken(q)) {
-    const combined = `${q} ${tvToken}`.replace(/\s+/g, " ").trim();
-    q = normalizeTv ? normalizeSearchQueryText(combined) : combined;
+  if (tvToken) {
+    if (!queryHasTvToken(q)) {
+      const combined = `${q} ${tvToken}`.replace(/\s+/g, " ").trim();
+      q = normalizeTv ? normalizeSearchQueryText(combined) : combined;
+    } else if (/^S\d{2}E\d{2,3}$/i.test(tvToken) && !queryHasEpisodeToken(q)) {
+      const seasonPrefix = tvToken.slice(0, 3);
+      const seasonOnlyRe = new RegExp(`\\b${seasonPrefix}\\b`, "i");
+      if (seasonOnlyRe.test(q)) {
+        q = q.replace(seasonOnlyRe, tvToken);
+      } else {
+        const combined = `${q} ${tvToken}`.replace(/\s+/g, " ").trim();
+        q = normalizeTv ? normalizeSearchQueryText(combined) : combined;
+      }
+    }
   }
 
   if (normalizeTv) {
@@ -611,11 +644,26 @@ function getTds(row) {
 }
 
 function normalizeTitle(s) {
-  return stripTags(s)
+  const placeholders = [];
+  const protect = (match) => {
+    const token = `__DOT_TOKEN_${placeholders.length}__`;
+    placeholders.push(match);
+    return token;
+  };
+
+  let out = stripTags(s)
     .replace(/_/g, " ")
-    .replace(/\./g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+    // Preserve YYYY.MM.DD daily episode dates
+    .replace(/\b(?:19|20)\d{2}\.\d{2}\.\d{2}\b/g, protect)
+    // Preserve H.264 / H.265 video codec tokens
+    .replace(/\bH\.26[45]\b/gi, protect)
+    // Preserve audio channel tokens such as 5.1, 7.1, 2.0 (including DDP5.1, AAC2.0, DD+5.1)
+    .replace(/(?:[A-Za-z+]|\b)[1257]\.[01]\b/g, protect)
+    .replace(/\./g, " ");
+
+  out = out.replace(/__DOT_TOKEN_(\d+)__/g, (_, idx) => placeholders[Number(idx)]);
+
+  return out.replace(/\s+/g, " ").trim();
 }
 
 function parseSizeToBytes(s) {
@@ -687,9 +735,9 @@ function parseDateToRfc822(s, nowMs = Date.now()) {
 }
 
 function categoryFromRow(row) {
-  if (/href=["']\/movies\//i.test(row)) return 2000;
-  if (/href=["']\/anime\//i.test(row)) return 5070;
-  if (/href=["']\/tv\//i.test(row)) return 5000;
+  if (/href=["'](?:https?:\/\/[^"'\s/]+)?\/movies\//i.test(row)) return 2000;
+  if (/href=["'](?:https?:\/\/[^"'\s/]+)?\/anime\//i.test(row)) return 5070;
+  if (/href=["'](?:https?:\/\/[^"'\s/]+)?\/tv\//i.test(row)) return 5000;
   return 7000;
 }
 
@@ -729,6 +777,145 @@ function findTorrentAnchor(row) {
   return null;
 }
 
+function filterItemsByCategory(items, catParam = "") {
+  const rawCats = String(catParam || "")
+    .split(",")
+    .map(c => Number(c.trim()))
+    .filter(n => Number.isFinite(n) && n > 0);
+
+  if (!rawCats.length) {
+    return items;
+  }
+
+  const allowMovies = rawCats.some(c => c >= 2000 && c < 3000);
+  const allowAnime = rawCats.some(c => c === 5070);
+  const allowTv = rawCats.some(c => c >= 5000 && c < 6000 && c !== 5070);
+
+  if (!allowMovies && !allowAnime && !allowTv) {
+    return items;
+  }
+
+  return items.filter(item => {
+    if (item.category === 2000) return allowMovies;
+    if (item.category === 5070) return allowAnime;
+    if (item.category === 5000) return allowTv;
+    return true;
+  });
+}
+
+function resolveItemCategories(items, catParam = "", searchType = "") {
+  const rawCats = String(catParam || "")
+    .split(",")
+    .map(c => Number(c.trim()))
+    .filter(n => Number.isFinite(n) && n > 0);
+
+  const allowMovies = rawCats.some(c => c >= 2000 && c < 3000);
+  const allowAnime = rawCats.some(c => c === 5070);
+  const allowTv = rawCats.some(c => c >= 5000 && c < 6000 && c !== 5070);
+  const t = String(searchType || "").toLowerCase();
+
+  return items.map(item => {
+    if (!item || item.category !== 7000) {
+      return item;
+    }
+
+    const looksLikeTv = /\b(?:S\d{1,2}(?:E\d{1,3})?|Season\s+\d{1,2}|\d{1,2}x\d{2,3}|(?:19|20)\d{2}\.\d{2}\.\d{2})\b/i.test(item.title || "");
+    let resolvedCat = 2000;
+
+    if (allowMovies && !allowTv && !allowAnime) {
+      resolvedCat = 2000;
+    } else if (allowAnime && !allowMovies && !allowTv) {
+      resolvedCat = 5070;
+    } else if (allowTv && !allowMovies && !allowAnime) {
+      resolvedCat = 5000;
+    } else if (t === "movie" && !allowTv && !allowAnime) {
+      resolvedCat = 2000;
+    } else if (t === "tvsearch" && !allowMovies) {
+      resolvedCat = allowAnime && !allowTv ? 5070 : 5000;
+    } else if (looksLikeTv) {
+      resolvedCat = allowTv || !rawCats.length ? 5000 : (allowAnime ? 5070 : 2000);
+    } else if (allowMovies || !rawCats.length) {
+      resolvedCat = 2000;
+    } else if (allowTv) {
+      resolvedCat = 5000;
+    } else if (allowAnime) {
+      resolvedCat = 5070;
+    }
+
+    return { ...item, category: resolvedCat };
+  });
+}
+
+function mergeSearchItems(...lists) {
+  const byId = new Map();
+
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      if (!item || !item.id) continue;
+      const existing = byId.get(item.id);
+      if (!existing) {
+        byId.set(item.id, { ...item });
+      } else if (!existing.imdbId && item.imdbId) {
+        existing.imdbId = item.imdbId;
+      }
+    }
+  }
+
+  return Array.from(byId.values());
+}
+
+async function resolveImdbTitle(imdbId) {
+  const norm = normalizeImdbId(imdbId);
+  if (!norm) return null;
+
+  const cached = getCache(imdbTitleCache, norm);
+  if (cached) return cached;
+
+  try {
+    const url = `https://v3.sg.media-imdb.com/suggestion/x/${norm}.json`;
+    const r = await fetch(url, {
+      headers: {
+        "accept": "application/json",
+        "user-agent": "Mozilla/5.0"
+      },
+      signal: AbortSignal.timeout(5000)
+    });
+
+    if (!r.ok) return null;
+
+    const json = await r.json();
+    const list = Array.isArray(json && json.d) ? json.d : [];
+    const hit = list.find(x => String(x && x.id || "").toLowerCase() === norm.toLowerCase()) || list[0];
+
+    if (!hit || !hit.l) return null;
+
+    const info = {
+      title: String(hit.l).replace(/\s+/g, " ").trim(),
+      year: Number(hit.y) || 0
+    };
+
+    setLimitedCache(imdbTitleCache, norm, info, 500, 24 * 60 * 60 * 1000);
+    log("[imdb] resolved", norm, JSON.stringify(info));
+    return info;
+  } catch (e) {
+    warn("[imdb] title lookup failed for", norm, ":", e.message || e);
+    return null;
+  }
+}
+
+function paginateItems(items, params) {
+  if (!params) return items;
+
+  const rawOffset = Number(params.get("offset") || 0);
+  const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
+
+  const rawLimit = params.has("limit") ? Number(params.get("limit")) : 100;
+  const limit = Number.isFinite(rawLimit) && rawLimit >= 0 ? Math.min(100, Math.floor(rawLimit)) : 100;
+
+  return items.slice(offset, offset + limit);
+}
+
 function parseResults(html, req) {
   const rows = getRows(html);
   const items = [];
@@ -736,6 +923,8 @@ function parseResults(html, req) {
   for (const row of rows) {
     const found = findTorrentAnchor(row);
     if (!found) continue;
+
+    const category = categoryFromRow(row);
 
     let relPath = found.href;
     const title = normalizeTitle(found.text);
@@ -765,7 +954,6 @@ function parseResults(html, req) {
     const size = parseSizeToBytes(sizeText);
     const seeders = Number((seedersText.replace(/,/g, "").match(/\d+/) || ["0"])[0]);
     const leechers = Number((leechersText.replace(/,/g, "").match(/\d+/) || ["0"])[0]);
-    const category = categoryFromRow(row);
 
     const publicBase = getPublicBaseUrl(req);
     const downloadUrl = `${publicBase}/download?id=${encodeURIComponent(id)}&path=${encodeURIComponent(relPath)}`;
@@ -800,14 +988,18 @@ function getPublicBaseUrl(req) {
 }
 
 function torznabCapsXml() {
+  const imdbEnabled = config.enableImdbSearch !== false;
+  const movieParams = imdbEnabled ? "q,imdbid" : "q";
+  const tvParams = imdbEnabled ? "q,season,ep,imdbid" : "q,season,ep";
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <caps>
   <server title="EXT Torznab Proxy" version="${APP_VERSION}" />
-  <limits max="100" default="50" />
+  <limits max="100" default="100" />
   <searching>
     <search available="yes" supportedParams="q" />
-    <movie-search available="yes" supportedParams="q,imdbid" />
-    <tv-search available="yes" supportedParams="q,season,ep,imdbid" />
+    <movie-search available="yes" supportedParams="${movieParams}" />
+    <tv-search available="yes" supportedParams="${tvParams}" />
   </searching>
   <categories>
     <category id="2000" name="Movies" />
@@ -822,15 +1014,14 @@ function torznabErrorXml(code, description) {
 <error code="${xmlEscape(code)}" description="${xmlEscape(description)}" />`;
 }
 
-function torznabResultsXml(items, imdbId = "") {
-  const normalizedImdb = normalizeImdbId(imdbId);
-  const imdbDigits = normalizedImdb ? normalizedImdb.slice(2) : "";
-  const imdbAttrs = normalizedImdb
-    ? `\n      <torznab:attr name="imdb" value="${xmlEscape(imdbDigits)}" />\n      <torznab:attr name="imdbid" value="${xmlEscape(normalizedImdb)}" />`
-    : "";
-
+function torznabResultsXml(items, defaultImdbId = "") {
   const itemXml = items.map(item => {
     const peers = item.seeders + item.leechers;
+    const normalizedImdb = normalizeImdbId(item.imdbId || defaultImdbId);
+    const imdbDigits = normalizedImdb ? normalizedImdb.slice(2) : "";
+    const imdbAttrs = normalizedImdb
+      ? `\n      <torznab:attr name="imdb" value="${xmlEscape(imdbDigits)}" />\n      <torznab:attr name="imdbid" value="${xmlEscape(normalizedImdb)}" />`
+      : "";
 
     return `    <item>
       <title>${xmlEscape(item.title)}</title>
@@ -844,7 +1035,9 @@ function torznabResultsXml(items, imdbId = "") {
       <torznab:attr name="category" value="${xmlEscape(item.category)}" />
       <torznab:attr name="seeders" value="${xmlEscape(item.seeders)}" />
       <torznab:attr name="peers" value="${xmlEscape(peers)}" />
-      <torznab:attr name="grabs" value="0" />${imdbAttrs}
+      <torznab:attr name="grabs" value="0" />
+      <torznab:attr name="downloadvolumefactor" value="0" />
+      <torznab:attr name="uploadvolumefactor" value="1" />${imdbAttrs}
     </item>`;
   }).join("\n");
 
@@ -876,19 +1069,63 @@ async function handleApi(req, res, u) {
   }
 
   if (t === "search" || t === "movie" || t === "tvsearch") {
-    const rawImdb = u.searchParams.get("imdbid") ?? u.searchParams.get("imdb_id") ?? "";
-    const imdbId = normalizeImdbId(rawImdb);
+    const imdbEnabled = config.enableImdbSearch !== false;
+    const rawImdb = imdbEnabled ? (u.searchParams.get("imdbid") ?? u.searchParams.get("imdb_id") ?? "") : "";
+    const imdbId = imdbEnabled ? normalizeImdbId(rawImdb) : "";
 
-    if (String(rawImdb).trim() && !imdbId) {
+    if (imdbEnabled && String(rawImdb).trim() && !imdbId) {
       return send(res, 400, "application/xml; charset=utf-8", torznabErrorXml(201, "Incorrect parameter (imdbid)"));
     }
 
     try {
       const q = buildSearchQuery(u.searchParams);
       const html = await fetchBrowse(q, imdbId);
-      const items = parseResults(html, req);
+      let parsed = parseResults(html, req).map(it => (imdbId ? { ...it, imdbId } : it));
 
-      return send(res, 200, "application/rss+xml; charset=utf-8", torznabResultsXml(items, imdbId));
+      if (imdbId) {
+        let seasonPackItems = [];
+        if (/^S\d{2}$/i.test(q)) {
+          try {
+            const htmlImdbAll = await fetchBrowse("", imdbId);
+            seasonPackItems = parseResults(htmlImdbAll, req).map(it => ({ ...it, imdbId }));
+          } catch (e) {
+            warn("[api] secondary imdb pack fetch ignored:", e.message || e);
+          }
+        }
+
+        let titleItems = [];
+        const rawUserQ = String(u.searchParams.get("q") || u.searchParams.get("search") || "").trim();
+        if (!rawUserQ) {
+          const info = await resolveImdbTitle(imdbId);
+          if (info && info.title) {
+            const normalizeTv = config.stripSeasonFromSearch !== false;
+            let fallbackQ = t === "movie" && info.year
+              ? `${info.title} ${info.year}`
+              : `${info.title} ${q}`.trim();
+            fallbackQ = normalizeTv
+              ? normalizeSearchQueryText(fallbackQ)
+              : fallbackQ.replace(/\s+/g, " ").trim();
+
+            if (fallbackQ) {
+              try {
+                const htmlTitle = await fetchBrowse(fallbackQ, "");
+                titleItems = parseResults(htmlTitle, req);
+              } catch (e) {
+                warn("[api] secondary title fetch ignored:", e.message || e);
+              }
+            }
+          }
+        }
+
+        parsed = mergeSearchItems(parsed, seasonPackItems, titleItems);
+      }
+
+      const catParam = u.searchParams.get("cat") || "";
+      const filtered = filterItemsByCategory(parsed, catParam);
+      const resolved = resolveItemCategories(filtered, catParam, t);
+      const items = paginateItems(resolved, u.searchParams);
+
+      return send(res, 200, "application/rss+xml; charset=utf-8", torznabResultsXml(items));
     } catch (e) {
       error("[api]", e && e.stack ? e.stack : e);
       return send(res, 500, "application/xml; charset=utf-8", torznabErrorXml(900, String(e.message || e)));
@@ -1763,7 +2000,7 @@ function settingsHtml(message = "") {
 
     .check-row {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
       gap: 12px;
       margin-top: 14px;
     }
@@ -1996,6 +2233,13 @@ function settingsHtml(message = "") {
             <small data-i18n="stripSeasonHint">Normalizes Season 2 / S2 / S02E4 style searches into S02 or S02E04.</small>
           </div>
         </div>
+        <div class="check">
+          <input id="enableImdbSearch" type="checkbox" name="enableImdbSearch" ${c.enableImdbSearch !== false ? "checked" : ""}>
+          <div>
+            <label for="enableImdbSearch" data-i18n="enableImdbSearch">Enable IMDb ID search (imdbid)</label>
+            <small data-i18n="enableImdbSearchHint">Advertises imdbid in Torznab caps and enables /browse/?imdb_id=tt... searches for Sonarr and Radarr.</small>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -2149,6 +2393,8 @@ function settingsHtml(message = "") {
     withAdultHint: "Browse isteklerine with_adult=1 ekler.",
     stripSeason: "Sezon/bölüm kalıplarını düzelt",
     stripSeasonHint: "Season 2 / S2 / S02E4 gibi aramaları S02 veya S02E04 biçimine çevirir.",
+    enableImdbSearch: "IMDb ID ile aramayı etkinleştir (imdbid)",
+    enableImdbSearchHint: "Torznab caps içinde imdbid desteğini açar; Sonarr ve Radarr için /browse/?imdb_id=tt... araması yapar.",
     warmCache: "Warm ve Önbellek",
     warmCacheDesc: "Cloudflare oturumunu sıcak tutar ve tekrar eden site isteklerini azaltır.",
     warmQuery: "Warm Arama Kelimesi",
@@ -2229,6 +2475,8 @@ function settingsHtml(message = "") {
     withAdultHint: "Adds with_adult=1 to browse requests.",
     stripSeason: "Normalize season/episode tokens",
     stripSeasonHint: "Normalizes Season 2 / S2 / S02E4 style searches into S02 or S02E04.",
+    enableImdbSearch: "Enable IMDb ID search (imdbid)",
+    enableImdbSearchHint: "Advertises imdbid in Torznab caps and enables /browse/?imdb_id=tt... searches for Sonarr and Radarr.",
     warmCache: "Warm and Cache",
     warmCacheDesc: "Keeps the Cloudflare session warm and limits repeated site requests.",
     warmQuery: "Warm Query",
@@ -2661,6 +2909,7 @@ function parseForm(body) {
     apiKey: String(p.get("apiKey") ?? "").trim(),
     withAdult: boolFromForm(p.get("withAdult")),
     stripSeasonFromSearch: boolFromForm(p.get("stripSeasonFromSearch")),
+    enableImdbSearch: boolFromForm(p.get("enableImdbSearch")),
     warmEnabled: boolFromForm(p.get("warmEnabled")),
     warmQuery,
     warmIntervalMinutes: positiveInt(p.get("warmIntervalMinutes"), config.warmIntervalMinutes || 10, 1),
@@ -2826,6 +3075,7 @@ module.exports = {
   APP_VERSION,
   normalizeMagnet,
   normalizeImdbId,
+  normalizeTitle,
   parseDateToRfc822,
   decodeEntities,
   xmlEscape,
@@ -2834,6 +3084,11 @@ module.exports = {
   buildSearchQuery,
   buildBrowsePath,
   parseResults,
+  filterItemsByCategory,
+  resolveItemCategories,
+  mergeSearchItems,
+  resolveImdbTitle,
+  paginateItems,
   setLimitedCache,
   fsCall,
   getConfig: () => config,
