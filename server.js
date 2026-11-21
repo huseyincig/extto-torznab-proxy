@@ -4,7 +4,7 @@ const path = require("path");
 const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || "8998");
-const APP_VERSION = "1.0.3";
+const APP_VERSION = "1.0.4";
 const CONFIG_DIR = process.env.CONFIG_DIR || "/config";
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
@@ -469,10 +469,24 @@ function queryHasTvToken(q) {
   return /\bS\d{2}(?:E\d{2,3})?\b/i.test(String(q || ""));
 }
 
+function normalizeImdbId(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  const m = raw.match(/^(?:tt)?(\d{1,10})$/i);
+  if (!m) return "";
+
+  const digits = m[1];
+  if (!/[1-9]/.test(digits)) return "";
+
+  return `tt${digits.padStart(7, "0")}`;
+}
+
 function buildSearchQuery(params) {
   let q = params.get("q") || params.get("search") || "";
+  const imdbId = normalizeImdbId(params.get("imdbid") || params.get("imdb_id") || "");
 
-  if (!q) {
+  if (!q && !imdbId) {
     q = config.warmQuery || "warm";
   }
 
@@ -492,13 +506,14 @@ function buildSearchQuery(params) {
     q = normalizeSearchQueryText(q);
   }
 
-  if (!q) {
+  if (!q && !imdbId) {
     q = config.warmQuery || "warm";
   }
 
   log("[query]", "built", JSON.stringify({
     t: params.get("t") || "",
     q,
+    imdbId,
     season: params.get("season") || "",
     ep: params.get("ep") || params.get("episode") || ""
   }));
@@ -506,10 +521,33 @@ function buildSearchQuery(params) {
   return q;
 }
 
-async function fetchBrowse(q) {
-  const baseUrl = normalizeBaseUrl(config.baseUrl);
+function buildBrowsePath(q, imdbId = "") {
   const withAdult = config.withAdult ? "1" : "0";
-  const searchPath = `/browse/?q=${encodeURIComponent(q).replace(/%20/g, "+")}&with_adult=${withAdult}`;
+  const normalizedImdb = normalizeImdbId(imdbId);
+  const queryText = String(q || "").trim();
+  const parts = [];
+
+  if (queryText) {
+    parts.push(`q=${encodeURIComponent(queryText).replace(/%20/g, "+")}`);
+  }
+
+  if (normalizedImdb) {
+    parts.push(`imdb_id=${encodeURIComponent(normalizedImdb)}`);
+  }
+
+  if (!parts.length) {
+    const fallback = config.warmQuery || "warm";
+    parts.push(`q=${encodeURIComponent(fallback).replace(/%20/g, "+")}`);
+  }
+
+  parts.push(`with_adult=${withAdult}`);
+
+  return `/browse/?${parts.join("&")}`;
+}
+
+async function fetchBrowse(q, imdbId = "") {
+  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  const searchPath = buildBrowsePath(q, imdbId);
   const targetUrl = baseUrl + searchPath;
   const cacheKey = targetUrl;
   const cached = getCache(searchCache, cacheKey);
@@ -768,8 +806,8 @@ function torznabCapsXml() {
   <limits max="100" default="50" />
   <searching>
     <search available="yes" supportedParams="q" />
-    <movie-search available="yes" supportedParams="q" />
-    <tv-search available="yes" supportedParams="q,season,ep" />
+    <movie-search available="yes" supportedParams="q,imdbid" />
+    <tv-search available="yes" supportedParams="q,season,ep,imdbid" />
   </searching>
   <categories>
     <category id="2000" name="Movies" />
@@ -784,7 +822,13 @@ function torznabErrorXml(code, description) {
 <error code="${xmlEscape(code)}" description="${xmlEscape(description)}" />`;
 }
 
-function torznabResultsXml(items) {
+function torznabResultsXml(items, imdbId = "") {
+  const normalizedImdb = normalizeImdbId(imdbId);
+  const imdbDigits = normalizedImdb ? normalizedImdb.slice(2) : "";
+  const imdbAttrs = normalizedImdb
+    ? `\n      <torznab:attr name="imdb" value="${xmlEscape(imdbDigits)}" />\n      <torznab:attr name="imdbid" value="${xmlEscape(normalizedImdb)}" />`
+    : "";
+
   const itemXml = items.map(item => {
     const peers = item.seeders + item.leechers;
 
@@ -800,7 +844,7 @@ function torznabResultsXml(items) {
       <torznab:attr name="category" value="${xmlEscape(item.category)}" />
       <torznab:attr name="seeders" value="${xmlEscape(item.seeders)}" />
       <torznab:attr name="peers" value="${xmlEscape(peers)}" />
-      <torznab:attr name="grabs" value="0" />
+      <torznab:attr name="grabs" value="0" />${imdbAttrs}
     </item>`;
   }).join("\n");
 
@@ -832,12 +876,19 @@ async function handleApi(req, res, u) {
   }
 
   if (t === "search" || t === "movie" || t === "tvsearch") {
+    const rawImdb = u.searchParams.get("imdbid") ?? u.searchParams.get("imdb_id") ?? "";
+    const imdbId = normalizeImdbId(rawImdb);
+
+    if (String(rawImdb).trim() && !imdbId) {
+      return send(res, 400, "application/xml; charset=utf-8", torznabErrorXml(201, "Incorrect parameter (imdbid)"));
+    }
+
     try {
       const q = buildSearchQuery(u.searchParams);
-      const html = await fetchBrowse(q);
+      const html = await fetchBrowse(q, imdbId);
       const items = parseResults(html, req);
 
-      return send(res, 200, "application/rss+xml; charset=utf-8", torznabResultsXml(items));
+      return send(res, 200, "application/rss+xml; charset=utf-8", torznabResultsXml(items, imdbId));
     } catch (e) {
       error("[api]", e && e.stack ? e.stack : e);
       return send(res, 500, "application/xml; charset=utf-8", torznabErrorXml(900, String(e.message || e)));
@@ -2774,11 +2825,14 @@ if (require.main === module) {
 module.exports = {
   APP_VERSION,
   normalizeMagnet,
+  normalizeImdbId,
   parseDateToRfc822,
   decodeEntities,
   xmlEscape,
   torznabCapsXml,
+  torznabResultsXml,
   buildSearchQuery,
+  buildBrowsePath,
   parseResults,
   setLimitedCache,
   fsCall,

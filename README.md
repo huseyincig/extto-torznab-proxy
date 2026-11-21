@@ -7,6 +7,7 @@ It is designed for Prowlarr and uses FlareSolverr internally for Cloudflare/sess
 ## Features
 
 - Generic Torznab API for Prowlarr
+- IMDb ID (`imdbid`) search support for Sonarr and Radarr (`movie-search` and `tv-search`)
 - FlareSolverr session handling
 - Internal warm timer
 - Search result cache
@@ -61,7 +62,7 @@ services:
 For a pinned version, use:
 
 ```yaml
-image: ghcr.io/huseyincig/extto-torznab-proxy:1.0.3
+image: ghcr.io/huseyincig/extto-torznab-proxy:1.0.4
 ```
 
 ## Web UI
@@ -137,12 +138,12 @@ This repository includes a GitHub Actions workflow that publishes multi-arch ima
 
 ```text
 ghcr.io/huseyincig/extto-torznab-proxy:latest
-ghcr.io/huseyincig/extto-torznab-proxy:1.0.3
+ghcr.io/huseyincig/extto-torznab-proxy:1.0.4
 ```
 
 Push a release tag to publish a versioned image:
 
 ```sh
-git tag v1.0.3
-git push origin v1.0.3
+git tag v1.0.4
+git push origin v1.0.4
 ```
