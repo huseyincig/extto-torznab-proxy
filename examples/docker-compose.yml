@@ -16,6 +16,7 @@ services:
       - TZ=Europe/Istanbul
       - PORT=8998
       - CONFIG_DIR=/config
+      - FLARESOLVERR_URL=${FLARESOLVERR_URL:-http://flaresolverr:8191/v1}
     ports:
       - "8998:8998"
     volumes:

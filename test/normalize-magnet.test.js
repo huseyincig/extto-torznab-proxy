@@ -3,8 +3,8 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 const { APP_VERSION, normalizeMagnet } = require("../server.js");
 
-test("APP_VERSION is 1.0.5", () => {
-  assert.equal(APP_VERSION, "1.0.5");
+test("APP_VERSION is 1.0.6", () => {
+  assert.equal(APP_VERSION, "1.0.6");
 });
 
 test("normalizeMagnet: preserves standard valid magnet URIs", () => {

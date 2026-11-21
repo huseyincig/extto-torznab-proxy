@@ -4,7 +4,7 @@ const path = require("path");
 const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || "8998");
-const APP_VERSION = "1.0.5";
+const APP_VERSION = "1.0.6";
 const CONFIG_DIR = process.env.CONFIG_DIR || "/config";
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
@@ -74,11 +74,34 @@ function randomApiKey() {
   return crypto.randomBytes(18).toString("hex");
 }
 
+function applyEnvOverrides(cfg, env = process.env) {
+  const next = { ...cfg };
+  if (!env) return next;
+
+  if (typeof env.FLARESOLVERR_URL === "string" && env.FLARESOLVERR_URL.trim()) {
+    next.flaresolverrUrl = env.FLARESOLVERR_URL.trim();
+  }
+  if (typeof env.BASE_URL === "string" && env.BASE_URL.trim()) {
+    next.baseUrl = normalizeBaseUrl(env.BASE_URL.trim());
+  }
+  if (typeof env.PUBLIC_URL === "string" && env.PUBLIC_URL.trim()) {
+    next.publicUrl = normalizeBaseUrl(env.PUBLIC_URL.trim());
+  }
+  if (typeof env.SESSION_NAME === "string" && env.SESSION_NAME.trim()) {
+    next.sessionName = env.SESSION_NAME.trim();
+  }
+  if (typeof env.API_KEY === "string" && env.API_KEY.trim()) {
+    next.apiKey = env.API_KEY.trim();
+  }
+
+  return next;
+}
+
 function loadConfig() {
   ensureConfigDir();
 
   if (!fs.existsSync(CONFIG_FILE)) {
-    const initial = { ...DEFAULT_CONFIG, apiKey: randomApiKey() };
+    const initial = applyEnvOverrides({ ...DEFAULT_CONFIG, apiKey: randomApiKey() });
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(initial, null, 2));
     return initial;
   }
@@ -86,17 +109,21 @@ function loadConfig() {
   try {
     const raw = fs.readFileSync(CONFIG_FILE, "utf8");
     const parsed = JSON.parse(raw);
-    const merged = { ...DEFAULT_CONFIG, ...parsed };
+    let merged = { ...DEFAULT_CONFIG, ...parsed };
 
     if (!merged.apiKey) {
       merged.apiKey = randomApiKey();
-      fs.writeFileSync(CONFIG_FILE, JSON.stringify(merged, null, 2));
     }
 
-    return merged;
+    const withEnv = applyEnvOverrides(merged);
+    if (JSON.stringify(withEnv) !== JSON.stringify(parsed)) {
+      fs.writeFileSync(CONFIG_FILE, JSON.stringify(withEnv, null, 2));
+    }
+
+    return withEnv;
   } catch (e) {
     error("[config] failed to read config, using defaults:", e.message || e);
-    return { ...DEFAULT_CONFIG, apiKey: randomApiKey() };
+    return applyEnvOverrides({ ...DEFAULT_CONFIG, apiKey: randomApiKey() });
   }
 }
 
@@ -106,15 +133,26 @@ function saveConfig(next) {
   config = { ...config, ...next };
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
 
+  const baseChanged = normalizeBaseUrl(prev.baseUrl) !== normalizeBaseUrl(config.baseUrl);
+  const publicChanged = normalizeBaseUrl(prev.publicUrl) !== normalizeBaseUrl(config.publicUrl);
+
   if (
-    normalizeBaseUrl(prev.baseUrl) !== normalizeBaseUrl(config.baseUrl) ||
+    baseChanged ||
     prev.flaresolverrUrl !== config.flaresolverrUrl ||
     prev.sessionName !== config.sessionName
   ) {
     sessionReady = false;
   }
 
-  if (timersStarted && Number(prev.warmIntervalMinutes) !== Number(config.warmIntervalMinutes)) {
+  if (baseChanged || publicChanged) {
+    searchCache.clear();
+  }
+
+  if (
+    timersStarted &&
+    (Number(prev.warmIntervalMinutes) !== Number(config.warmIntervalMinutes) ||
+      Boolean(prev.warmEnabled) !== Boolean(config.warmEnabled))
+  ) {
     rescheduleWarmTimer();
   }
 }
@@ -136,16 +174,23 @@ function htmlEscape(s) {
   return xmlEscape(s).replace(/'/g, "&#39;");
 }
 
+function safeFromCodePoint(cp, fallback) {
+  if (!Number.isInteger(cp) || cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+    return fallback;
+  }
+  return String.fromCodePoint(cp);
+}
+
 function decodeEntities(s) {
   return String(s || "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&apos;/g, "'")
-    .replace(/&quot;/g, "\"")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&");
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&#(\d+);/g, (match, dec) => safeFromCodePoint(Number(dec), match))
+    .replace(/&#x([0-9a-f]+);/gi, (match, hex) => safeFromCodePoint(parseInt(hex, 16), match))
+    .replace(/&apos;/gi, "'")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&");
 }
 
 function stripTags(s) {
@@ -404,6 +449,7 @@ function clearExpiredCache() {
   const now = Date.now();
   let removedSearches = 0;
   let removedMagnets = 0;
+  let removedImdbTitles = 0;
 
   for (const [key, value] of searchCache.entries()) {
     if (now > value.expiresAt) {
@@ -419,7 +465,14 @@ function clearExpiredCache() {
     }
   }
 
-  return { removedSearches, removedMagnets };
+  for (const [key, value] of imdbTitleCache.entries()) {
+    if (now > value.expiresAt) {
+      imdbTitleCache.delete(key);
+      removedImdbTitles++;
+    }
+  }
+
+  return { removedSearches, removedMagnets, removedImdbTitles };
 }
 
 function padNumberText(value, width) {
@@ -503,19 +556,49 @@ function normalizeImdbId(value) {
   return `tt${digits.padStart(7, "0")}`;
 }
 
-function buildSearchQuery(params) {
-  let q = params.get("q") || params.get("search") || "";
+function extractSearchInputs(params) {
   const imdbEnabled = config.enableImdbSearch !== false;
-  const imdbId = imdbEnabled ? normalizeImdbId(params.get("imdbid") || params.get("imdb_id") || "") : "";
+  const anyImdbParam = String(params.get("imdbid") ?? params.get("imdb_id") ?? "").trim();
+  const rawImdbParam = imdbEnabled ? anyImdbParam : "";
+  let rawQ = String(params.get("q") || params.get("search") || "").trim();
+  let extractedImdb = "";
 
-  if (!q && !imdbId) {
+  if (rawQ) {
+    const braceMatch = rawQ.match(/\{ImdbId:\s*([^}]*)\}/i);
+    if (braceMatch) {
+      if (imdbEnabled) {
+        extractedImdb = normalizeImdbId(braceMatch[1]);
+      }
+      rawQ = rawQ.replace(braceMatch[0], " ").replace(/\s+/g, " ").trim();
+    } else if (imdbEnabled) {
+      const ttMatch = rawQ.match(/\b(tt\d{5,10})\b/i);
+      if (ttMatch) {
+        extractedImdb = normalizeImdbId(ttMatch[1]);
+        rawQ = rawQ.replace(ttMatch[0], " ").replace(/\s+/g, " ").trim();
+      }
+    }
+  }
+
+  const imdbId = imdbEnabled
+    ? (rawImdbParam ? normalizeImdbId(rawImdbParam) : extractedImdb)
+    : "";
+
+  const hasOtherExternalId = ["tmdbid", "tvdbid", "tvmazeid", "rid", "traktid", "doubanid"].some(
+    k => String(params.get(k) || "").trim().length > 0
+  );
+  const hasDisabledImdbOnly = !imdbEnabled && Boolean(anyImdbParam);
+  const unsupportedIdOnly = !rawQ && !imdbId && (hasOtherExternalId || hasDisabledImdbOnly);
+
+  let q = rawQ;
+
+  if (!q && !imdbId && !unsupportedIdOnly) {
     q = config.warmQuery || "warm";
   }
 
   const normalizeTv = config.stripSeasonFromSearch !== false;
   q = normalizeTv ? normalizeSearchQueryText(q) : String(q).replace(/\s+/g, " ").trim();
 
-  const tvToken = buildTvToken(params);
+  const tvToken = unsupportedIdOnly ? "" : buildTvToken(params);
 
   // Prowlarr tvsearch may pass season/ep separately instead of embedding them in q.
   // Keep the season/episode token and normalize it into: "Title S02" or "Title S02E04".
@@ -539,9 +622,27 @@ function buildSearchQuery(params) {
     q = normalizeSearchQueryText(q);
   }
 
-  if (!q && !imdbId) {
+  if (!q && !imdbId && !unsupportedIdOnly) {
     q = config.warmQuery || "warm";
   }
+
+  const titleOnlyQ = normalizeSearchQueryText(rawQ)
+    .replace(/\b(?:S\d{2}(?:E\d{2,3})?|(?:19|20)\d{2}\.\d{2}\.\d{2})\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return {
+    q,
+    rawQ,
+    titleOnlyQ,
+    imdbId,
+    rawImdbParam,
+    unsupportedIdOnly
+  };
+}
+
+function buildSearchQuery(params) {
+  const { q, imdbId } = extractSearchInputs(params);
 
   log("[query]", "built", JSON.stringify({
     t: params.get("t") || "",
@@ -667,11 +768,20 @@ function normalizeTitle(s) {
 }
 
 function parseSizeToBytes(s) {
-  const raw = String(s || "").replace(/,/g, ".").trim();
-  const m = raw.match(/([\d.]+)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)/i);
+  const raw = String(s || "").trim();
+  const m = raw.match(/([\d.,]+)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)/i);
   if (!m) return 0;
 
-  const n = Number(m[1]);
+  let numStr = m[1];
+  if (numStr.includes(",") && numStr.includes(".")) {
+    numStr = numStr.replace(/,/g, "");
+  } else if (numStr.includes(",")) {
+    numStr = numStr.replace(/,/g, ".");
+  }
+
+  const n = Number(numStr);
+  if (!Number.isFinite(n) || n < 0) return 0;
+
   const unit = m[2].toUpperCase();
 
   const mult =
@@ -725,10 +835,11 @@ function parseDateToRfc822(s, nowMs = Date.now()) {
     return d.toUTCString();
   }
 
-  const d = new Date(text);
-
-  if (!isNaN(d.getTime())) {
-    return d.toUTCString();
+  if (/\b(?:19|20)\d{2}\b/.test(text)) {
+    const d = new Date(text);
+    if (!isNaN(d.getTime())) {
+      return d.toUTCString();
+    }
   }
 
   return new Date(nowMs).toUTCString();
@@ -745,6 +856,23 @@ function attr(tag, name) {
   const re = new RegExp(name + "\\s*=\\s*([\"'])(.*?)\\1", "i");
   const m = String(tag || "").match(re);
   return m ? decodeEntities(m[2]) : "";
+}
+
+function toRelativeTorrentPath(href) {
+  let rel = String(href || "").trim();
+  if (!rel) return "";
+
+  if (/^https?:\/\//i.test(rel)) {
+    try {
+      rel = new URL(rel).pathname;
+    } catch {
+      return "";
+    }
+  } else if (config.baseUrl && rel.startsWith(config.baseUrl)) {
+    rel = rel.slice(normalizeBaseUrl(config.baseUrl).length);
+  }
+
+  return rel;
 }
 
 function findTorrentAnchor(row) {
@@ -767,10 +895,11 @@ function findTorrentAnchor(row) {
   while ((m = re.exec(row))) {
     const a = m[0];
     const href = attr(a, "href");
+    const rel = toRelativeTorrentPath(href);
 
-    if (href && /^\/.+-\d+\/?$/.test(href)) {
+    if (rel && /^\/.+-\d+\/?$/.test(rel)) {
       const text = a.replace(/<a\b[^>]*>/i, "").replace(/<\/a>/i, "");
-      return { href, text };
+      return { href: rel, text };
     }
   }
 
@@ -926,14 +1055,10 @@ function parseResults(html, req) {
 
     const category = categoryFromRow(row);
 
-    let relPath = found.href;
+    let relPath = toRelativeTorrentPath(found.href);
     const title = normalizeTitle(found.text);
 
     if (!title || !relPath) continue;
-
-    if (relPath.startsWith(config.baseUrl)) {
-      relPath = relPath.slice(normalizeBaseUrl(config.baseUrl).length);
-    }
 
     if (!relPath.startsWith("/")) continue;
 
@@ -983,8 +1108,13 @@ function getPublicBaseUrl(req) {
     return normalizeBaseUrl(config.publicUrl);
   }
 
-  const host = req.headers.host || `localhost:${PORT}`;
-  return `http://${host}`;
+  const headers = (req && req.headers) || {};
+  const forwardedProto = String(headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  const proto = forwardedProto === "https" || forwardedProto === "http" ? forwardedProto : "http";
+  const forwardedHost = String(headers["x-forwarded-host"] || "").split(",")[0].trim();
+  const host = forwardedHost || headers.host || `localhost:${PORT}`;
+
+  return `${proto}://${host}`;
 }
 
 function torznabCapsXml() {
@@ -1070,11 +1200,14 @@ async function handleApi(req, res, u) {
 
   if (t === "search" || t === "movie" || t === "tvsearch") {
     const imdbEnabled = config.enableImdbSearch !== false;
-    const rawImdb = imdbEnabled ? (u.searchParams.get("imdbid") ?? u.searchParams.get("imdb_id") ?? "") : "";
-    const imdbId = imdbEnabled ? normalizeImdbId(rawImdb) : "";
+    const { imdbId, rawImdbParam, titleOnlyQ, unsupportedIdOnly } = extractSearchInputs(u.searchParams);
 
-    if (imdbEnabled && String(rawImdb).trim() && !imdbId) {
+    if (imdbEnabled && rawImdbParam && !normalizeImdbId(rawImdbParam)) {
       return send(res, 400, "application/xml; charset=utf-8", torznabErrorXml(201, "Incorrect parameter (imdbid)"));
+    }
+
+    if (unsupportedIdOnly) {
+      return send(res, 200, "application/rss+xml; charset=utf-8", torznabResultsXml([]));
     }
 
     try {
@@ -1094,8 +1227,7 @@ async function handleApi(req, res, u) {
         }
 
         let titleItems = [];
-        const rawUserQ = String(u.searchParams.get("q") || u.searchParams.get("search") || "").trim();
-        if (!rawUserQ) {
+        if (!titleOnlyQ) {
           const info = await resolveImdbTitle(imdbId);
           if (info && info.title) {
             const normalizeTv = config.stripSeasonFromSearch !== false;
@@ -1418,6 +1550,10 @@ function rescheduleWarmTimer() {
     warmIntervalHandle = null;
   }
 
+  if (!config.warmEnabled) {
+    return;
+  }
+
   const intervalMs = Math.max(1, Number(config.warmIntervalMinutes || 10)) * 60 * 1000;
   warmIntervalHandle = setInterval(() => {
     runWarmTick("interval").catch(e => {
@@ -1553,6 +1689,701 @@ function getLastWarmRunView() {
   }
 
   return `${formatDurationView(lastWarm.durationSeconds || 0, lastWarm.durationMs)} ${lastWarm.state || "UNKNOWN"}`;
+}
+
+const SUPPORTED_UI_LANGS = ["en", "tr", "es", "ru", "pt", "fr", "de", "pl"];
+
+const UI_I18N = {
+  en: {
+    subtitle: "A self-hosted Torznab gateway for EXT results with FlareSolverr session handling, warm checks, cache and magnet resolving.",
+    session: "Session",
+    warm: "Warm",
+    ready: "Ready",
+    cold: "Cold",
+    on: "On",
+    off: "Off",
+    busy: "Busy",
+    idle: "Idle",
+    runningState: "RUNNING",
+    challengeState: "CHALLENGE",
+    warmState: "WARM",
+    coldChallengeState: "COLD/CHALLENGE",
+    errorState: "ERROR",
+    prowlarrInfo: "Prowlarr Generic Torznab",
+    caps: "Caps",
+    copy: "Copy",
+    copied: "Copied",
+    copyFailed: "Failed",
+    settingsSaved: "Settings saved.",
+    quickUrl: "URL",
+    quickApiPath: "API Path",
+    quickApiKey: "API Key",
+    searchCache: "Search Cache",
+    magnetCache: "Magnet Cache",
+    idleSeconds: "Idle Seconds",
+    warmAge: "Warm Age",
+    lastWarmRun: "Last Warm / Challenge",
+    lastWarm: "Last Warm",
+    siteAndFs: "Site and FlareSolverr",
+    siteAndFsDesc: "Main site URL, FlareSolverr endpoint, session name and API identity.",
+    baseUrl: "Base URL",
+    baseUrlHint: "Target EXT site domain used internally by the proxy.",
+    publicUrl: "Public URL",
+    publicUrlHint: "Address Prowlarr can reach. Leave empty to use browser origin on this page.",
+    fsHint: "Usually http://flaresolverr:8191/v1 when both containers share a Docker network.",
+    sessionName: "Session Name",
+    sessionNameHint: "Persistent FlareSolverr browser session name.",
+    flaresolverrUrl: "FlareSolverr URL",
+    apiKeyLabel: "API Key",
+    apiKeyHint: "Used by Prowlarr Generic Torznab.",
+    copyApiKey: "Copy API key",
+    generateApiKey: "Generate new API key",
+    apiKeyCopied: "API key copied",
+    apiKeyCopyFailed: "API key copy failed",
+    apiKeyGenerated: "New API key was generated, saved to the config file, and copied to the clipboard. Do not forget to update the API Key field in Prowlarr too.",
+    apiKeyRotateTitle: "Generate a new API key?",
+    apiKeyRotateConfirm: "A new API key will be written to the config file immediately. After this change, you must update the API Key field in Prowlarr with the new key. Continue?",
+    ok: "OK",
+    cancel: "Cancel",
+    requestTimeout: "Request Timeout (ms)",
+    requestTimeoutHint: "Must be higher than Cloudflare challenge duration.",
+    withAdult: "Include adult results",
+    withAdultHint: "Adds with_adult=1 to browse requests.",
+    stripSeason: "Normalize season/episode tokens",
+    stripSeasonHint: "Normalizes Season 2 / S2 / S02E4 style searches into S02 or S02E04.",
+    enableImdbSearch: "Enable IMDb ID search (imdbid)",
+    enableImdbSearchHint: "Advertises imdbid in Torznab caps and enables /browse/?imdb_id=tt... searches for Sonarr and Radarr.",
+    warmCache: "Warm and Cache",
+    warmCacheDesc: "Keeps the Cloudflare session warm and limits repeated site requests.",
+    warmQuery: "Warm Query",
+    warmInterval: "Warm Interval (minutes)",
+    coldThreshold: "Cold Threshold (seconds)",
+    searchTtl: "Search TTL (seconds)",
+    magnetTtl: "Magnet TTL (minutes)",
+    idleTimeout: "Idle Timeout (minutes)",
+    maxSearch: "Max Search Cache Items",
+    maxMagnet: "Max Magnet Cache Items",
+    warmEnabled: "Enable internal warm timer",
+    warmEnabledHint: "The container periodically calls /warm by itself. No external cron is required for this container.",
+    manualWarm: "Manual Warm",
+    clearCache: "Clear Cache",
+    autoRefresh: "Auto refresh",
+    secondsShort: "sec",
+    running: "Running...",
+    warmOk: "Warm completed",
+    cacheClearOk: "Cache cleared",
+    sessionReset: "Session Reset",
+    sessionResetOk: "Session reset completed",
+    actionFailed: "Action failed",
+    save: "Save Settings",
+    footer: "EXT Torznab Proxy runs locally. Keep this page inside your trusted network."
+  },
+  tr: {
+    subtitle: "FlareSolverr oturumu, sıcak tutma, cache ve magnet çözme desteği olan EXT için bağımsız Torznab geçidi.",
+    session: "Oturum",
+    warm: "Warm",
+    ready: "Hazır",
+    cold: "Soğuk",
+    on: "Açık",
+    off: "Kapalı",
+    busy: "Meşgul",
+    idle: "Boşta",
+    runningState: "ÇALIŞIYOR",
+    challengeState: "CHALLENGE",
+    warmState: "WARM",
+    coldChallengeState: "COLD/CHALLENGE",
+    errorState: "HATA",
+    prowlarrInfo: "Prowlarr Generic Torznab Bilgileri",
+    caps: "Caps",
+    copy: "Kopyala",
+    copied: "Kopyalandı",
+    copyFailed: "Kopyalanamadı",
+    settingsSaved: "Ayarlar kaydedildi.",
+    quickUrl: "URL",
+    quickApiPath: "API Yolu",
+    quickApiKey: "API Anahtarı",
+    searchCache: "Arama Önbelleği",
+    magnetCache: "Magnet Önbelleği",
+    idleSeconds: "Boşta Süresi",
+    warmAge: "Warm Süresi",
+    lastWarmRun: "Son Warm / Challenge",
+    lastWarm: "Son Warm",
+    siteAndFs: "Site ve FlareSolverr",
+    siteAndFsDesc: "Ana site adresi, FlareSolverr bağlantısı, session adı ve API kimliği.",
+    baseUrl: "Site Adresi",
+    baseUrlHint: "Proxy'nin içeride kullandığı hedef EXT site adresi.",
+    publicUrl: "Dış Erişim Adresi",
+    publicUrlHint: "Prowlarr'ın erişeceği adres. Boş bırakılırsa bu sayfanın adresi gösterilir.",
+    fsHint: "İki container aynı Docker ağındaysa genelde http://flaresolverr:8191/v1 olur.",
+    sessionName: "Oturum Adı",
+    sessionNameHint: "Kalıcı FlareSolverr tarayıcı oturumu adı.",
+    flaresolverrUrl: "FlareSolverr Adresi",
+    apiKeyLabel: "API Anahtarı",
+    apiKeyHint: "Prowlarr Generic Torznab tarafından kullanılır.",
+    copyApiKey: "API anahtarını kopyala",
+    generateApiKey: "Yeni API anahtarı üret",
+    apiKeyCopied: "API anahtarı kopyalandı",
+    apiKeyCopyFailed: "API anahtarı kopyalanamadı",
+    apiKeyGenerated: "Yeni API anahtarı oluşturuldu, ayar dosyasına yazıldı ve panoya kopyalandı. Prowlarr içindeki API Key alanını da bu yeni anahtarla güncellemeyi unutmayın.",
+    apiKeyRotateTitle: "Yeni API anahtarı oluşturulsun mu?",
+    apiKeyRotateConfirm: "Yeni API anahtarı hemen ayar dosyasına yazılacak. Bu işlemden sonra Prowlarr içindeki API Key alanını da yeni anahtarla güncellemeniz gerekir. Devam edilsin mi?",
+    ok: "Tamam",
+    cancel: "İptal",
+    requestTimeout: "İstek Zaman Aşımı (ms)",
+    requestTimeoutHint: "Cloudflare challenge süresinden yüksek olmalı.",
+    withAdult: "Adult sonuçları dahil et",
+    withAdultHint: "Browse isteklerine with_adult=1 ekler.",
+    stripSeason: "Sezon/bölüm kalıplarını düzelt",
+    stripSeasonHint: "Season 2 / S2 / S02E4 gibi aramaları S02 veya S02E04 biçimine çevirir.",
+    enableImdbSearch: "IMDb ID ile aramayı etkinleştir (imdbid)",
+    enableImdbSearchHint: "Torznab caps içinde imdbid desteğini açar; Sonarr ve Radarr için /browse/?imdb_id=tt... araması yapar.",
+    warmCache: "Warm ve Önbellek",
+    warmCacheDesc: "Cloudflare oturumunu sıcak tutar ve tekrar eden site isteklerini azaltır.",
+    warmQuery: "Warm Arama Kelimesi",
+    warmInterval: "Warm Aralığı (dakika)",
+    coldThreshold: "Cold Eşiği (saniye)",
+    searchTtl: "Arama Önbellek Süresi (saniye)",
+    magnetTtl: "Magnet Önbellek Süresi (dakika)",
+    idleTimeout: "Boşta Oturum Kapatma (dakika)",
+    maxSearch: "Maksimum Arama Önbellek Adedi",
+    maxMagnet: "Maksimum Magnet Önbellek Adedi",
+    warmEnabled: "Dahili warm zamanlayıcısını aç",
+    warmEnabledHint: "Container belirli aralıklarla kendi içinde /warm çağırır. Bu container için harici cron gerekmez.",
+    manualWarm: "Manuel Warm",
+    clearCache: "Önbelleği Temizle",
+    autoRefresh: "Otomatik yenile",
+    secondsShort: "sn",
+    running: "Çalışıyor...",
+    warmOk: "Warm tamamlandı",
+    cacheClearOk: "Önbellek temizlendi",
+    sessionReset: "Session Reset",
+    sessionResetOk: "Session sıfırlandı",
+    actionFailed: "İşlem başarısız",
+    save: "Ayarları Kaydet",
+    footer: "EXT Torznab Proxy yerel ağda çalışır. Bu sayfayı güvenilir ağ içinde tutun."
+  },
+  es: {
+    subtitle: "Pasarela Torznab autoalojada para resultados EXT con gestión de sesiones FlareSolverr, calentamiento, caché y resolución de enlaces magnet.",
+    session: "Sesión",
+    warm: "Warm",
+    ready: "Lista",
+    cold: "Fría",
+    on: "Activo",
+    off: "Inactivo",
+    busy: "Ocupado",
+    idle: "Inactivo",
+    runningState: "EJECUTANDO",
+    challengeState: "CHALLENGE",
+    warmState: "WARM",
+    coldChallengeState: "FRÍA/CHALLENGE",
+    errorState: "ERROR",
+    prowlarrInfo: "Prowlarr Generic Torznab",
+    caps: "Caps",
+    copy: "Copiar",
+    copied: "Copiado",
+    copyFailed: "Error",
+    settingsSaved: "Configuración guardada.",
+    quickUrl: "URL",
+    quickApiPath: "Ruta API",
+    quickApiKey: "Clave API",
+    searchCache: "Caché de búsqueda",
+    magnetCache: "Caché de magnet",
+    idleSeconds: "Segundos inactivo",
+    warmAge: "Edad de Warm",
+    lastWarmRun: "Último Warm / Challenge",
+    lastWarm: "Último Warm",
+    siteAndFs: "Sitio y FlareSolverr",
+    siteAndFsDesc: "URL del sitio principal, endpoint de FlareSolverr, nombre de sesión e identidad API.",
+    baseUrl: "URL Base",
+    baseUrlHint: "Dominio EXT de destino utilizado internamente por el proxy.",
+    publicUrl: "URL Pública",
+    publicUrlHint: "Dirección accesible por Prowlarr. Déjelo vacío para usar el origen del navegador.",
+    fsHint: "Normalmente http://flaresolverr:8191/v1 cuando ambos contenedores comparten red Docker.",
+    sessionName: "Nombre de sesión",
+    sessionNameHint: "Nombre de la sesión persistente del navegador en FlareSolverr.",
+    flaresolverrUrl: "URL de FlareSolverr",
+    apiKeyLabel: "Clave API",
+    apiKeyHint: "Utilizada por Prowlarr Generic Torznab.",
+    copyApiKey: "Copiar clave API",
+    generateApiKey: "Generar nueva clave API",
+    apiKeyCopied: "Clave API copiada",
+    apiKeyCopyFailed: "No se pudo copiar la clave API",
+    apiKeyGenerated: "Se generó una nueva clave API, se guardó en la configuración y se copió al portapapeles. No olvide actualizarla también en Prowlarr.",
+    apiKeyRotateTitle: "¿Generar una nueva clave API?",
+    apiKeyRotateConfirm: "Se escribirá una nueva clave API inmediatamente. Después de este cambio deberá actualizar el campo API Key en Prowlarr. ¿Continuar?",
+    ok: "Aceptar",
+    cancel: "Cancelar",
+    requestTimeout: "Tiempo de espera de solicitud (ms)",
+    requestTimeoutHint: "Debe ser mayor que la duración del desafío de Cloudflare.",
+    withAdult: "Incluir resultados para adultos",
+    withAdultHint: "Añade with_adult=1 a las solicitudes de búsqueda.",
+    stripSeason: "Normalizar tokens de temporada/episodio",
+    stripSeasonHint: "Convierte búsquedas como Season 2 / S2 / S02E4 al formato S02 o S02E04.",
+    enableImdbSearch: "Habilitar búsqueda por IMDb ID (imdbid)",
+    enableImdbSearchHint: "Anuncia imdbid en Torznab caps y habilita búsquedas /browse/?imdb_id=tt... para Sonarr y Radarr.",
+    warmCache: "Warm y Caché",
+    warmCacheDesc: "Mantiene activa la sesión de Cloudflare y reduce solicitudes repetidas al sitio.",
+    warmQuery: "Consulta Warm",
+    warmInterval: "Intervalo Warm (minutos)",
+    coldThreshold: "Umbral frío (segundos)",
+    searchTtl: "TTL de búsqueda (segundos)",
+    magnetTtl: "TTL de magnet (minutos)",
+    idleTimeout: "Tiempo máximo de inactividad (minutos)",
+    maxSearch: "Máx. elementos en caché de búsqueda",
+    maxMagnet: "Máx. elementos en caché de magnet",
+    warmEnabled: "Habilitar temporizador warm interno",
+    warmEnabledHint: "El contenedor llama periódicamente a /warm por sí mismo. No requiere cron externo.",
+    manualWarm: "Warm Manual",
+    clearCache: "Limpiar Caché",
+    autoRefresh: "Auto actualizar",
+    secondsShort: "seg",
+    running: "Ejecutando...",
+    warmOk: "Warm completado",
+    cacheClearOk: "Caché limpiada",
+    sessionReset: "Reiniciar Sesión",
+    sessionResetOk: "Sesión reiniciada",
+    actionFailed: "Acción fallida",
+    save: "Guardar Configuración",
+    footer: "EXT Torznab Proxy se ejecuta localmente. Mantenga esta página dentro de su red de confianza."
+  },
+  ru: {
+    subtitle: "Автономный Torznab-шлюз для EXT с поддержкой сессий FlareSolverr, прогревом Cloudflare, кэшированием и извлечением magnet-ссылок.",
+    session: "Сессия",
+    warm: "Прогрев",
+    ready: "Готова",
+    cold: "Холодная",
+    on: "Вкл",
+    off: "Выкл",
+    busy: "Занят",
+    idle: "Ожидание",
+    runningState: "ВЫПОЛНЯЕТСЯ",
+    challengeState: "CHALLENGE",
+    warmState: "WARM",
+    coldChallengeState: "COLD/CHALLENGE",
+    errorState: "ОШИБКА",
+    prowlarrInfo: "Prowlarr Generic Torznab",
+    caps: "Caps",
+    copy: "Копировать",
+    copied: "Скопировано",
+    copyFailed: "Ошибка",
+    settingsSaved: "Настройки сохранены.",
+    quickUrl: "URL",
+    quickApiPath: "Путь API",
+    quickApiKey: "API-ключ",
+    searchCache: "Кэш поиска",
+    magnetCache: "Кэш magnet",
+    idleSeconds: "Простой (сек)",
+    warmAge: "Возраст прогрева",
+    lastWarmRun: "Последний прогрев / Challenge",
+    lastWarm: "Последний прогрев",
+    siteAndFs: "Сайт и FlareSolverr",
+    siteAndFsDesc: "Основной URL сайта, адрес FlareSolverr, имя сессии и ключ API.",
+    baseUrl: "Базовый URL",
+    baseUrlHint: "Целевой домен EXT, используемый прокси-сервером.",
+    publicUrl: "Публичный URL",
+    publicUrlHint: "Адрес, доступный для Prowlarr. Оставьте пустым для использования текущего адреса.",
+    fsHint: "Обычно http://flaresolverr:8191/v1, если оба контейнера находятся в одной сети Docker.",
+    sessionName: "Имя сессии",
+    sessionNameHint: "Имя постоянной браузерной сессии во FlareSolverr.",
+    flaresolverrUrl: "URL FlareSolverr",
+    apiKeyLabel: "API-ключ",
+    apiKeyHint: "Используется индексером Prowlarr Generic Torznab.",
+    copyApiKey: "Скопировать API-ключ",
+    generateApiKey: "Сгенерировать новый API-ключ",
+    apiKeyCopied: "API-ключ скопирован",
+    apiKeyCopyFailed: "Не удалось скопировать API-ключ",
+    apiKeyGenerated: "Новый API-ключ создан, сохранен в конфигурации и скопирован в буфер обмена. Не забудьте обновить API Key в Prowlarr.",
+    apiKeyRotateTitle: "Создать новый API-ключ?",
+    apiKeyRotateConfirm: "Новый API-ключ будет сразу записан в файл конфигурации. После этого необходимо обновить поле API Key в Prowlarr. Продолжить?",
+    ok: "ОК",
+    cancel: "Отмена",
+    requestTimeout: "Таймаут запроса (мс)",
+    requestTimeoutHint: "Должен превышать время прохождения проверки Cloudflare.",
+    withAdult: "Включать результаты 18+",
+    withAdultHint: "Добавляет параметр with_adult=1 к поисковым запросам.",
+    stripSeason: "Нормализовать сезоны и серии",
+    stripSeasonHint: "Преобразует запросы вида Season 2 / S2 / S02E4 в формат S02 или S02E04.",
+    enableImdbSearch: "Включить поиск по IMDb ID (imdbid)",
+    enableImdbSearchHint: "Добавляет imdbid в Torznab caps и включает поиск /browse/?imdb_id=tt... для Sonarr и Radarr.",
+    warmCache: "Прогрев и кэш",
+    warmCacheDesc: "Поддерживает активную сессию Cloudflare и снижает количество повторных запросов.",
+    warmQuery: "Запрос для прогрева",
+    warmInterval: "Интервал прогрева (мин)",
+    coldThreshold: "Порог холодного старта (сек)",
+    searchTtl: "TTL кэша поиска (сек)",
+    magnetTtl: "TTL кэша magnet (мин)",
+    idleTimeout: "Таймаут простоя сессии (мин)",
+    maxSearch: "Макс. записей в кэше поиска",
+    maxMagnet: "Макс. записей в кэше magnet",
+    warmEnabled: "Включить внутренний таймер прогрева",
+    warmEnabledHint: "Контейнер периодически вызывает /warm самостоятельно. Внешний cron не требуется.",
+    manualWarm: "Ручной прогрев",
+    clearCache: "Очистить кэш",
+    autoRefresh: "Автообновление",
+    secondsShort: "сек",
+    running: "Выполняется...",
+    warmOk: "Прогрев завершен",
+    cacheClearOk: "Кэш очищен",
+    sessionReset: "Сброс сессии",
+    sessionResetOk: "Сессия сброшена",
+    actionFailed: "Ошибка выполнения",
+    save: "Сохранить настройки",
+    footer: "EXT Torznab Proxy работает локально. Держите эту страницу в доверенной сети."
+  },
+  pt: {
+    subtitle: "Gateway Torznab auto-hospedado para resultados EXT com gerenciamento de sessão FlareSolverr, aquecimento, cache e resolução de magnet.",
+    session: "Sessão",
+    warm: "Warm",
+    ready: "Pronta",
+    cold: "Fria",
+    on: "Ativo",
+    off: "Inativo",
+    busy: "Ocupado",
+    idle: "Ocioso",
+    runningState: "EXECUTANDO",
+    challengeState: "CHALLENGE",
+    warmState: "WARM",
+    coldChallengeState: "FRIA/CHALLENGE",
+    errorState: "ERRO",
+    prowlarrInfo: "Prowlarr Generic Torznab",
+    caps: "Caps",
+    copy: "Copiar",
+    copied: "Copiado",
+    copyFailed: "Falhou",
+    settingsSaved: "Configurações salvas.",
+    quickUrl: "URL",
+    quickApiPath: "Caminho da API",
+    quickApiKey: "Chave da API",
+    searchCache: "Cache de Busca",
+    magnetCache: "Cache de Magnet",
+    idleSeconds: "Segundos Ocioso",
+    warmAge: "Idade do Warm",
+    lastWarmRun: "Último Warm / Challenge",
+    lastWarm: "Último Warm",
+    siteAndFs: "Site e FlareSolverr",
+    siteAndFsDesc: "URL principal do site, endpoint do FlareSolverr, nome da sessão e chave da API.",
+    baseUrl: "URL Base",
+    baseUrlHint: "Domínio EXT de destino usado internamente pelo proxy.",
+    publicUrl: "URL Pública",
+    publicUrlHint: "Endereço acessível pelo Prowlarr. Deixe em branco para usar a origem atual do navegador.",
+    fsHint: "Normalmente http://flaresolverr:8191/v1 quando ambos os contêineres compartilham a mesma rede Docker.",
+    sessionName: "Nome da Sessão",
+    sessionNameHint: "Nome da sessão persistente do navegador no FlareSolverr.",
+    flaresolverrUrl: "URL do FlareSolverr",
+    apiKeyLabel: "Chave da API",
+    apiKeyHint: "Usada pelo indexador Prowlarr Generic Torznab.",
+    copyApiKey: "Copiar chave da API",
+    generateApiKey: "Gerar nova chave da API",
+    apiKeyCopied: "Chave da API copiada",
+    apiKeyCopyFailed: "Falha ao copiar a chave da API",
+    apiKeyGenerated: "Uma nova chave da API foi gerada, salva na configuração e copiada para a área de transferência. Não se esqueça de atualizá-la no Prowlarr.",
+    apiKeyRotateTitle: "Gerar uma nova chave da API?",
+    apiKeyRotateConfirm: "Uma nova chave da API será gravada imediatamente. Após esta alteração, você precisará atualizar o campo API Key no Prowlarr. Continuar?",
+    ok: "OK",
+    cancel: "Cancelar",
+    requestTimeout: "Tempo Limite da Requisição (ms)",
+    requestTimeoutHint: "Deve ser maior que a duração do desafio do Cloudflare.",
+    withAdult: "Incluir resultados adultos",
+    withAdultHint: "Adiciona with_adult=1 às requisições de busca.",
+    stripSeason: "Normalizar tokens de temporada/episódio",
+    stripSeasonHint: "Converte buscas como Season 2 / S2 / S02E4 para o formato S02 ou S02E04.",
+    enableImdbSearch: "Ativar busca por IMDb ID (imdbid)",
+    enableImdbSearchHint: "Anuncia imdbid no Torznab caps e ativa buscas /browse/?imdb_id=tt... para Sonarr e Radarr.",
+    warmCache: "Warm e Cache",
+    warmCacheDesc: "Mantém a sessão do Cloudflare aquecida e reduz requisições repetidas ao site.",
+    warmQuery: "Termo de Busca Warm",
+    warmInterval: "Intervalo do Warm (minutos)",
+    coldThreshold: "Limite Frio (segundos)",
+    searchTtl: "TTL do Cache de Busca (segundos)",
+    magnetTtl: "TTL do Cache de Magnet (minutos)",
+    idleTimeout: "Tempo Limite de Ociosidade (minutos)",
+    maxSearch: "Máx. Itens no Cache de Busca",
+    maxMagnet: "Máx. Itens no Cache de Magnet",
+    warmEnabled: "Ativar temporizador warm interno",
+    warmEnabledHint: "O contêiner chama /warm periodicamente por conta própria. Nenhum cron externo é necessário.",
+    manualWarm: "Warm Manual",
+    clearCache: "Limpar Cache",
+    autoRefresh: "Atualização automática",
+    secondsShort: "seg",
+    running: "Executando...",
+    warmOk: "Warm concluído",
+    cacheClearOk: "Cache limpo",
+    sessionReset: "Redefinir Sessão",
+    sessionResetOk: "Sessão redefinida",
+    actionFailed: "Falha na ação",
+    save: "Salvar Configurações",
+    footer: "O EXT Torznab Proxy roda localmente. Mantenha esta página dentro da sua rede confiável."
+  },
+  fr: {
+    subtitle: "Passerelle Torznab auto-hébergée pour les résultats EXT avec gestion de session FlareSolverr, préchauffage, cache et résolution magnet.",
+    session: "Session",
+    warm: "Warm",
+    ready: "Prête",
+    cold: "Froide",
+    on: "Activé",
+    off: "Désactivé",
+    busy: "Occupé",
+    idle: "Inactif",
+    runningState: "EN COURS",
+    challengeState: "CHALLENGE",
+    warmState: "WARM",
+    coldChallengeState: "FROID/CHALLENGE",
+    errorState: "ERREUR",
+    prowlarrInfo: "Prowlarr Generic Torznab",
+    caps: "Caps",
+    copy: "Copier",
+    copied: "Copié",
+    copyFailed: "Échec",
+    settingsSaved: "Paramètres enregistrés.",
+    quickUrl: "URL",
+    quickApiPath: "Chemin API",
+    quickApiKey: "Clé API",
+    searchCache: "Cache de recherche",
+    magnetCache: "Cache magnet",
+    idleSeconds: "Secondes d'inactivité",
+    warmAge: "Âge du Warm",
+    lastWarmRun: "Dernier Warm / Challenge",
+    lastWarm: "Dernier Warm",
+    siteAndFs: "Site et FlareSolverr",
+    siteAndFsDesc: "URL principale du site, point de terminaison FlareSolverr, nom de session et clé API.",
+    baseUrl: "URL de base",
+    baseUrlHint: "Domaine EXT cible utilisé en interne par le proxy.",
+    publicUrl: "URL publique",
+    publicUrlHint: "Adresse accessible par Prowlarr. Laissez vide pour utiliser l'origine actuelle du navigateur.",
+    fsHint: "Généralement http://flaresolverr:8191/v1 lorsque les deux conteneurs partagent un réseau Docker.",
+    sessionName: "Nom de session",
+    sessionNameHint: "Nom de la session persistante du navigateur dans FlareSolverr.",
+    flaresolverrUrl: "URL FlareSolverr",
+    apiKeyLabel: "Clé API",
+    apiKeyHint: "Utilisée par Prowlarr Generic Torznab.",
+    copyApiKey: "Copier la clé API",
+    generateApiKey: "Générer une nouvelle clé API",
+    apiKeyCopied: "Clé API copiée",
+    apiKeyCopyFailed: "Échec de la copie de la clé API",
+    apiKeyGenerated: "Une nouvelle clé API a été générée, enregistrée et copiée dans le presse-papiers. N'oubliez pas de la mettre à jour dans Prowlarr.",
+    apiKeyRotateTitle: "Générer une nouvelle clé API ?",
+    apiKeyRotateConfirm: "Une nouvelle clé API sera immédiatement enregistrée. Après ce changement, vous devrez mettre à jour le champ API Key dans Prowlarr. Continuer ?",
+    ok: "OK",
+    cancel: "Annuler",
+    requestTimeout: "Délai d'expiration de requête (ms)",
+    requestTimeoutHint: "Doit être supérieur à la durée du challenge Cloudflare.",
+    withAdult: "Inclure les résultats adultes",
+    withAdultHint: "Ajoute with_adult=1 aux requêtes de recherche.",
+    stripSeason: "Normaliser les jetons saison/épisode",
+    stripSeasonHint: "Normalise les recherches de type Season 2 / S2 / S02E4 en S02 ou S02E04.",
+    enableImdbSearch: "Activer la recherche par IMDb ID (imdbid)",
+    enableImdbSearchHint: "Annonce imdbid dans Torznab caps et active les recherches /browse/?imdb_id=tt... pour Sonarr et Radarr.",
+    warmCache: "Warm et Cache",
+    warmCacheDesc: "Maintient la session Cloudflare active et limite les requêtes répétées vers le site.",
+    warmQuery: "Requête Warm",
+    warmInterval: "Intervalle Warm (minutes)",
+    coldThreshold: "Seuil froid (secondes)",
+    searchTtl: "TTL de recherche (secondes)",
+    magnetTtl: "TTL des magnets (minutes)",
+    idleTimeout: "Délai d'inactivité (minutes)",
+    maxSearch: "Éléments max. du cache de recherche",
+    maxMagnet: "Éléments max. du cache magnet",
+    warmEnabled: "Activer le minuteur warm interne",
+    warmEnabledHint: "Le conteneur appelle périodiquement /warm de lui-même. Aucun cron externe n'est requis.",
+    manualWarm: "Warm Manuel",
+    clearCache: "Vider le Cache",
+    autoRefresh: "Actualisation auto",
+    secondsShort: "sec",
+    running: "En cours...",
+    warmOk: "Warm terminé",
+    cacheClearOk: "Cache vidé",
+    sessionReset: "Réinitialiser la Session",
+    sessionResetOk: "Session réinitialisée",
+    actionFailed: "Échec de l'action",
+    save: "Enregistrer",
+    footer: "EXT Torznab Proxy fonctionne localement. Gardez cette page au sein de votre réseau de confiance."
+  },
+  de: {
+    subtitle: "Selbstgehostetes Torznab-Gateway für EXT-Ergebnisse mit FlareSolverr-Sitzungsverwaltung, Warm-Checks, Cache und Magnet-Auflösung.",
+    session: "Sitzung",
+    warm: "Warm",
+    ready: "Bereit",
+    cold: "Kalt",
+    on: "An",
+    off: "Aus",
+    busy: "Beschäftigt",
+    idle: "Leerlauf",
+    runningState: "LÄUFT",
+    challengeState: "CHALLENGE",
+    warmState: "WARM",
+    coldChallengeState: "KALT/CHALLENGE",
+    errorState: "FEHLER",
+    prowlarrInfo: "Prowlarr Generic Torznab",
+    caps: "Caps",
+    copy: "Kopieren",
+    copied: "Kopiert",
+    copyFailed: "Fehler",
+    settingsSaved: "Einstellungen gespeichert.",
+    quickUrl: "URL",
+    quickApiPath: "API-Pfad",
+    quickApiKey: "API-Schlüssel",
+    searchCache: "Such-Cache",
+    magnetCache: "Magnet-Cache",
+    idleSeconds: "Leerlauf (Sek.)",
+    warmAge: "Warm-Alter",
+    lastWarmRun: "Letzter Warm / Challenge",
+    lastWarm: "Letzter Warm",
+    siteAndFs: "Seite und FlareSolverr",
+    siteAndFsDesc: "Haupt-URL der Seite, FlareSolverr-Endpunkt, Sitzungsname und API-Schlüssel.",
+    baseUrl: "Basis-URL",
+    baseUrlHint: "Ziel-EXT-Domain, die intern vom Proxy verwendet wird.",
+    publicUrl: "Öffentliche URL",
+    publicUrlHint: "Für Prowlarr erreichbare Adresse. Leer lassen, um die aktuelle Browser-Adresse zu nutzen.",
+    fsHint: "Meist http://flaresolverr:8191/v1, wenn sich beide Container im selben Docker-Netzwerk befinden.",
+    sessionName: "Sitzungsname",
+    sessionNameHint: "Name der persistenten FlareSolverr-Browsersitzung.",
+    flaresolverrUrl: "FlareSolverr-URL",
+    apiKeyLabel: "API-Schlüssel",
+    apiKeyHint: "Wird von Prowlarr Generic Torznab verwendet.",
+    copyApiKey: "API-Schlüssel kopieren",
+    generateApiKey: "Neuen API-Schlüssel erzeugen",
+    apiKeyCopied: "API-Schlüssel kopiert",
+    apiKeyCopyFailed: "API-Schlüssel konnte nicht kopiert werden",
+    apiKeyGenerated: "Neuer API-Schlüssel wurde erzeugt, gespeichert und in die Zwischenablage kopiert. Vergessen Sie nicht, den Schlüssel auch in Prowlarr zu aktualisieren.",
+    apiKeyRotateTitle: "Neuen API-Schlüssel erzeugen?",
+    apiKeyRotateConfirm: "Ein neuer API-Schlüssel wird sofort in die Konfigurationsdatei geschrieben. Danach müssen Sie das Feld API Key in Prowlarr aktualisieren. Fortfahren?",
+    ok: "OK",
+    cancel: "Abbrechen",
+    requestTimeout: "Anfrage-Timeout (ms)",
+    requestTimeoutHint: "Muss höher als die Dauer der Cloudflare-Challenge sein.",
+    withAdult: "Erwachsenen-Inhalte einbeziehen",
+    withAdultHint: "Fügt Suchanfragen with_adult=1 hinzu.",
+    stripSeason: "Staffel-/Episoden-Tokens normalisieren",
+    stripSeasonHint: "Wandelt Suchanfragen wie Season 2 / S2 / S02E4 in S02 oder S02E04 um.",
+    enableImdbSearch: "IMDb-ID-Suche aktivieren (imdbid)",
+    enableImdbSearchHint: "Meldet imdbid in den Torznab-Caps und aktiviert /browse/?imdb_id=tt... Suchen für Sonarr und Radarr.",
+    warmCache: "Warm und Cache",
+    warmCacheDesc: "Hält die Cloudflare-Sitzung aktiv und reduziert wiederholte Seitenabfragen.",
+    warmQuery: "Warm-Suchbegriff",
+    warmInterval: "Warm-Intervall (Minuten)",
+    coldThreshold: "Kalt-Schwellenwert (Sekunden)",
+    searchTtl: "Such-Cache-TTL (Sekunden)",
+    magnetTtl: "Magnet-Cache-TTL (Minuten)",
+    idleTimeout: "Sitzungs-Timeout bei Inaktivität (Minuten)",
+    maxSearch: "Max. Such-Cache-Einträge",
+    maxMagnet: "Max. Magnet-Cache-Einträge",
+    warmEnabled: "Internen Warm-Timer aktivieren",
+    warmEnabledHint: "Der Container ruft regelmäßig selbst /warm auf. Kein externer Cron erforderlich.",
+    manualWarm: "Manueller Warm",
+    clearCache: "Cache leeren",
+    autoRefresh: "Auto-Aktualisierung",
+    secondsShort: "Sek",
+    running: "Läuft...",
+    warmOk: "Warm abgeschlossen",
+    cacheClearOk: "Cache geleert",
+    sessionReset: "Sitzung zurücksetzen",
+    sessionResetOk: "Sitzung zurückgesetzt",
+    actionFailed: "Aktion fehlgeschlagen",
+    save: "Einstellungen speichern",
+    footer: "EXT Torznab Proxy läuft lokal. Halten Sie diese Seite in Ihrem vertrauenswürdigen Netzwerk."
+  },
+  pl: {
+    subtitle: "Samodzielna bramka Torznab dla wyników EXT z obsługą sesji FlareSolverr, podtrzymaniem sesji, pamięcią podręczną i rozwiązywaniem linków magnet.",
+    session: "Sesja",
+    warm: "Warm",
+    ready: "Gotowa",
+    cold: "Zimna",
+    on: "Wł.",
+    off: "Wył.",
+    busy: "Zajęty",
+    idle: "Bezczynny",
+    runningState: "W TOKU",
+    challengeState: "CHALLENGE",
+    warmState: "WARM",
+    coldChallengeState: "ZIMNA/CHALLENGE",
+    errorState: "BŁĄD",
+    prowlarrInfo: "Prowlarr Generic Torznab",
+    caps: "Caps",
+    copy: "Kopiuj",
+    copied: "Skopiowano",
+    copyFailed: "Błąd",
+    settingsSaved: "Ustawienia zostały zapisane.",
+    quickUrl: "URL",
+    quickApiPath: "Ścieżka API",
+    quickApiKey: "Klucz API",
+    searchCache: "Cache wyszukiwania",
+    magnetCache: "Cache magnet",
+    idleSeconds: "Sekundy bezczynności",
+    warmAge: "Wiek Warm",
+    lastWarmRun: "Ostatni Warm / Challenge",
+    lastWarm: "Ostatni Warm",
+    siteAndFs: "Strona i FlareSolverr",
+    siteAndFsDesc: "Główny adres strony, punkt końcowy FlareSolverr, nazwa sesji oraz klucz API.",
+    baseUrl: "Bazowy URL",
+    baseUrlHint: "Docelowa domena EXT używana wewnętrznie przez proxy.",
+    publicUrl: "Publiczny URL",
+    publicUrlHint: "Adres dostępny dla Prowlarr. Pozostaw puste, aby użyć bieżącego adresu przeglądarki.",
+    fsHint: "Zazwyczaj http://flaresolverr:8191/v1, gdy oba kontenery współdzielą sieć Docker.",
+    sessionName: "Nazwa sesji",
+    sessionNameHint: "Nazwa trwałej sesji przeglądarki we FlareSolverr.",
+    flaresolverrUrl: "URL FlareSolverr",
+    apiKeyLabel: "Klucz API",
+    apiKeyHint: "Używany przez indekser Prowlarr Generic Torznab.",
+    copyApiKey: "Kopiuj klucz API",
+    generateApiKey: "Wygeneruj nowy klucz API",
+    apiKeyCopied: "Skopiowano klucz API",
+    apiKeyCopyFailed: "Nie udało się skopiować klucza API",
+    apiKeyGenerated: "Wygenerowano nowy klucz API, zapisano w konfiguracji i skopiowano do schowka. Nie zapomnij zaktualizować pola API Key w Prowlarr.",
+    apiKeyRotateTitle: "Wygenerować nowy klucz API?",
+    apiKeyRotateConfirm: "Nowy klucz API zostanie natychmiast zapisany w pliku konfiguracyjnym. Po tej zmianie musisz zaktualizować pole API Key w Prowlarr. Kontynuować?",
+    ok: "OK",
+    cancel: "Anuluj",
+    requestTimeout: "Limit czasu żądania (ms)",
+    requestTimeoutHint: "Musi być dłuższy niż czas trwania weryfikacji Cloudflare.",
+    withAdult: "Uwzględniaj wyniki dla dorosłych (18+)",
+    withAdultHint: "Dodaje with_adult=1 do zapytań wyszukiwania.",
+    stripSeason: "Normalizuj oznaczenia sezonów/odcinków",
+    stripSeasonHint: "Zamienia zapytania typu Season 2 / S2 / S02E4 na format S02 lub S02E04.",
+    enableImdbSearch: "Włącz wyszukiwanie po IMDb ID (imdbid)",
+    enableImdbSearchHint: "Ogłasza imdbid w Torznab caps i włącza wyszukiwanie /browse/?imdb_id=tt... dla Sonarr i Radarr.",
+    warmCache: "Warm i Cache",
+    warmCacheDesc: "Utrzymuje aktywną sesję Cloudflare i ogranicza powtarzające się zapytania do strony.",
+    warmQuery: "Zapytanie Warm",
+    warmInterval: "Interwał Warm (minuty)",
+    coldThreshold: "Próg zimnego startu (sekundy)",
+    searchTtl: "TTL cache wyszukiwania (sekundy)",
+    magnetTtl: "TTL cache magnet (minuty)",
+    idleTimeout: "Limit bezczynności sesji (minuty)",
+    maxSearch: "Maks. wpisów w cache wyszukiwania",
+    maxMagnet: "Maks. wpisów w cache magnet",
+    warmEnabled: "Włącz wewnętrzny harmonogram warm",
+    warmEnabledHint: "Kontener sam okresowo wywołuje /warm. Zewnętrzny cron nie jest wymagany.",
+    manualWarm: "Ręczny Warm",
+    clearCache: "Wyczyść Cache",
+    autoRefresh: "Auto-odświeżanie",
+    secondsShort: "sek",
+    running: "Wykonywanie...",
+    warmOk: "Warm zakończony",
+    cacheClearOk: "Wyczyść cache zakończone",
+    sessionReset: "Resetuj Sesję",
+    sessionResetOk: "Sesja zresetowana",
+    actionFailed: "Operacja nie powiodła się",
+    save: "Zapisz Ustawienia",
+    footer: "EXT Torznab Proxy działa lokalnie. Udostępniaj tę stronę wyłącznie w zaufanej sieci."
+  }
+};
+
+function resolveUiLang(preferred) {
+  const candidates = Array.isArray(preferred)
+    ? preferred
+    : String(preferred || "")
+        .split(",")
+        .map(s => s.split(";")[0].trim())
+        .filter(Boolean);
+
+  for (const raw of candidates) {
+    const code = String(raw || "").trim().toLowerCase().split(/[-_]/)[0];
+    if (code && SUPPORTED_UI_LANGS.includes(code)) {
+      return code;
+    }
+  }
+
+  return "en";
 }
 
 function settingsHtml(message = "") {
@@ -2154,7 +2985,7 @@ function settingsHtml(message = "") {
     </div>
   </div>
 
-  ${message ? `<p class="msg">${htmlEscape(message)}</p>` : ""}
+  ${message ? `<p class="msg"${message === "Settings saved." ? ' data-i18n="settingsSaved"' : ""}>${htmlEscape(message)}</p>` : ""}
 
   <div class="status-grid">
     <div class="stat"><span data-i18n="searchCache">Search Cache</span><strong id="searchCacheVal">${searchCache.size}</strong></div>
@@ -2339,178 +3170,33 @@ function settingsHtml(message = "") {
 
 <script>
 (function () {
-  var tr = {
-    subtitle: "FlareSolverr oturumu, sıcak tutma, cache ve magnet çözme desteği olan EXT için bağımsız Torznab geçidi.",
-    session: "Oturum",
-    warm: "Warm",
-    ready: "Hazır",
-    cold: "Soğuk",
-    on: "Açık",
-    off: "Kapalı",
-    busy: "Meşgul",
-    idle: "Boşta",
-    runningState: "ÇALIŞIYOR",
-    challengeState: "CHALLENGE",
-    warmState: "WARM",
-    coldChallengeState: "COLD/CHALLENGE",
-    errorState: "HATA",
-    prowlarrInfo: "Prowlarr Generic Torznab Bilgileri",
-    caps: "Caps",
-    copy: "Kopyala",
-    quickUrl: "URL",
-    quickApiPath: "API Yolu",
-    quickApiKey: "API Anahtarı",
-    searchCache: "Arama Önbelleği",
-    magnetCache: "Magnet Önbelleği",
-    idleSeconds: "Boşta Süresi",
-    warmAge: "Warm Süresi",
-    lastWarmRun: "Son Warm / Challenge",
-    lastWarm: "Son Warm",
-    siteAndFs: "Site ve FlareSolverr",
-    siteAndFsDesc: "Ana site adresi, FlareSolverr bağlantısı, session adı ve API kimliği.",
-    baseUrl: "Site Adresi",
-    baseUrlHint: "Proxy'nin içeride kullandığı hedef EXT site adresi.",
-    publicUrl: "Dış Erişim Adresi",
-    publicUrlHint: "Prowlarr'ın erişeceği adres. Boş bırakılırsa bu sayfanın adresi gösterilir.",
-    fsHint: "İki container aynı Docker ağındaysa genelde http://flaresolverr:8191/v1 olur.",
-    sessionName: "Oturum Adı",
-    sessionNameHint: "Kalıcı FlareSolverr tarayıcı oturumu adı.",
-    flaresolverrUrl: "FlareSolverr Adresi",
-    apiKeyLabel: "API Anahtarı",
-    apiKeyHint: "Prowlarr Generic Torznab tarafından kullanılır.",
-    copyApiKey: "API anahtarını kopyala",
-    generateApiKey: "Yeni API anahtarı üret",
-    apiKeyCopied: "API anahtarı kopyalandı",
-    apiKeyCopyFailed: "API anahtarı kopyalanamadı",
-    apiKeyGenerated: "Yeni API anahtarı oluşturuldu, ayar dosyasına yazıldı ve panoya kopyalandı. Prowlarr içindeki API Key alanını da bu yeni anahtarla güncellemeyi unutmayın.",
-    apiKeyRotateTitle: "Yeni API anahtarı oluşturulsun mu?",
-    apiKeyRotateConfirm: "Yeni API anahtarı hemen ayar dosyasına yazılacak. Bu işlemden sonra Prowlarr içindeki API Key alanını da yeni anahtarla güncellemeniz gerekir. Devam edilsin mi?",
-    ok: "Tamam",
-    cancel: "İptal",
-    requestTimeout: "İstek Zaman Aşımı (ms)",
-    requestTimeoutHint: "Cloudflare challenge süresinden yüksek olmalı.",
-    withAdult: "Adult sonuçları dahil et",
-    withAdultHint: "Browse isteklerine with_adult=1 ekler.",
-    stripSeason: "Sezon/bölüm kalıplarını düzelt",
-    stripSeasonHint: "Season 2 / S2 / S02E4 gibi aramaları S02 veya S02E04 biçimine çevirir.",
-    enableImdbSearch: "IMDb ID ile aramayı etkinleştir (imdbid)",
-    enableImdbSearchHint: "Torznab caps içinde imdbid desteğini açar; Sonarr ve Radarr için /browse/?imdb_id=tt... araması yapar.",
-    warmCache: "Warm ve Önbellek",
-    warmCacheDesc: "Cloudflare oturumunu sıcak tutar ve tekrar eden site isteklerini azaltır.",
-    warmQuery: "Warm Arama Kelimesi",
-    warmInterval: "Warm Aralığı (dakika)",
-    coldThreshold: "Cold Eşiği (saniye)",
-    searchTtl: "Arama Önbellek Süresi (saniye)",
-    magnetTtl: "Magnet Önbellek Süresi (dakika)",
-    idleTimeout: "Boşta Oturum Kapatma (dakika)",
-    maxSearch: "Maksimum Arama Önbellek Adedi",
-    maxMagnet: "Maksimum Magnet Önbellek Adedi",
-    warmEnabled: "Dahili warm zamanlayıcısını aç",
-    warmEnabledHint: "Container belirli aralıklarla kendi içinde /warm çağırır. Bu container için harici cron gerekmez.",
-    manualWarm: "Manuel Warm",
-    clearCache: "Önbelleği Temizle",
-    autoRefresh: "Otomatik yenile",
-    secondsShort: "sn",
-    running: "Çalışıyor...",
-    warmOk: "Warm tamamlandı",
-    cacheClearOk: "Önbellek temizlendi",
-    sessionReset: "Session Reset",
-    sessionResetOk: "Session sıfırlandı",
-    actionFailed: "İşlem başarısız",
-    save: "Ayarları Kaydet",
-    footer: "EXT Torznab Proxy yerel ağda çalışır. Bu sayfayı güvenilir ağ içinde tutun."
-  };
-
-  var en = {
-    subtitle: "A self-hosted Torznab gateway for EXT results with FlareSolverr session handling, warm checks, cache and magnet resolving.",
-    session: "Session",
-    warm: "Warm",
-    ready: "Ready",
-    cold: "Cold",
-    on: "On",
-    off: "Off",
-    busy: "Busy",
-    idle: "Idle",
-    runningState: "RUNNING",
-    challengeState: "CHALLENGE",
-    warmState: "WARM",
-    coldChallengeState: "COLD/CHALLENGE",
-    errorState: "ERROR",
-    prowlarrInfo: "Prowlarr Generic Torznab",
-    caps: "Caps",
-    copy: "Copy",
-    quickUrl: "URL",
-    quickApiPath: "API Path",
-    quickApiKey: "API Key",
-    searchCache: "Search Cache",
-    magnetCache: "Magnet Cache",
-    idleSeconds: "Idle Seconds",
-    warmAge: "Warm Age",
-    lastWarmRun: "Last Warm / Challenge",
-    lastWarm: "Last Warm",
-    siteAndFs: "Site and FlareSolverr",
-    siteAndFsDesc: "Main site URL, FlareSolverr endpoint, session name and API identity.",
-    baseUrl: "Base URL",
-    baseUrlHint: "Target EXT site domain used internally by the proxy.",
-    publicUrl: "Public URL",
-    publicUrlHint: "Address Prowlarr can reach. Leave empty to use browser origin on this page.",
-    fsHint: "Usually http://flaresolverr:8191/v1 when both containers share a Docker network.",
-    sessionName: "Session Name",
-    sessionNameHint: "Persistent FlareSolverr browser session name.",
-    flaresolverrUrl: "FlareSolverr URL",
-    apiKeyLabel: "API Key",
-    apiKeyHint: "Used by Prowlarr Generic Torznab.",
-    copyApiKey: "Copy API key",
-    generateApiKey: "Generate new API key",
-    apiKeyCopied: "API key copied",
-    apiKeyCopyFailed: "API key copy failed",
-    apiKeyGenerated: "New API key was generated, saved to the config file, and copied to the clipboard. Do not forget to update the API Key field in Prowlarr too.",
-    apiKeyRotateTitle: "Generate a new API key?",
-    apiKeyRotateConfirm: "A new API key will be written to the config file immediately. After this change, you must update the API Key field in Prowlarr with the new key. Continue?",
-    ok: "OK",
-    cancel: "Cancel",
-    requestTimeout: "Request Timeout (ms)",
-    requestTimeoutHint: "Must be higher than Cloudflare challenge duration.",
-    withAdult: "Include adult results",
-    withAdultHint: "Adds with_adult=1 to browse requests.",
-    stripSeason: "Normalize season/episode tokens",
-    stripSeasonHint: "Normalizes Season 2 / S2 / S02E4 style searches into S02 or S02E04.",
-    enableImdbSearch: "Enable IMDb ID search (imdbid)",
-    enableImdbSearchHint: "Advertises imdbid in Torznab caps and enables /browse/?imdb_id=tt... searches for Sonarr and Radarr.",
-    warmCache: "Warm and Cache",
-    warmCacheDesc: "Keeps the Cloudflare session warm and limits repeated site requests.",
-    warmQuery: "Warm Query",
-    warmInterval: "Warm Interval (minutes)",
-    coldThreshold: "Cold Threshold (seconds)",
-    searchTtl: "Search TTL (seconds)",
-    magnetTtl: "Magnet TTL (minutes)",
-    idleTimeout: "Idle Timeout (minutes)",
-    maxSearch: "Max Search Cache Items",
-    maxMagnet: "Max Magnet Cache Items",
-    warmEnabled: "Enable internal warm timer",
-    warmEnabledHint: "The container periodically calls /warm by itself. No external cron is required for this container.",
-    manualWarm: "Manual Warm",
-    clearCache: "Clear Cache",
-    autoRefresh: "Auto refresh",
-    secondsShort: "sec",
-    running: "Running...",
-    warmOk: "Warm completed",
-    cacheClearOk: "Cache cleared",
-    sessionReset: "Session Reset",
-    sessionResetOk: "Session reset completed",
-    actionFailed: "Action failed",
-    save: "Save Settings",
-    footer: "EXT Torznab Proxy runs locally. Keep this page inside your trusted network."
-  };
+  var i18n = ${JSON.stringify(UI_I18N)};
+  var supportedLangs = ${JSON.stringify(SUPPORTED_UI_LANGS)};
+  var en = i18n.en;
 
   if (window.location.search.indexOf("saved=1") >= 0) {
     window.history.replaceState(null, "", "/");
   }
 
-  var lang = (navigator.language || navigator.userLanguage || "en").toLowerCase();
-  var dict = lang.indexOf("tr") === 0 ? tr : en;
+  function detectBrowserLang() {
+    var list = Array.isArray(navigator.languages) && navigator.languages.length
+      ? navigator.languages
+      : [navigator.language || navigator.userLanguage || "en"];
 
-  document.documentElement.lang = lang.indexOf("tr") === 0 ? "tr" : "en";
+    for (var i = 0; i < list.length; i++) {
+      var code = String(list[i] || "").trim().toLowerCase().split(/[-_]/)[0];
+      if (code && supportedLangs.indexOf(code) >= 0) {
+        return code;
+      }
+    }
+
+    return "en";
+  }
+
+  var langCode = detectBrowserLang();
+  var dict = i18n[langCode] || en;
+
+  document.documentElement.lang = langCode;
 
   var initialStatus = {
     sessionReady: ${sessionReady ? "true" : "false"},
@@ -2630,9 +3316,9 @@ function settingsHtml(message = "") {
       var ok = await copyText(text);
 
       if (ok) {
-        btn.textContent = lang.indexOf("tr") === 0 ? "Kopyalandı" : "Copied";
+        btn.textContent = dict.copied || "Copied";
       } else {
-        btn.textContent = lang.indexOf("tr") === 0 ? "Kopyalanamadı" : "Failed";
+        btn.textContent = dict.copyFailed || "Failed";
       }
 
       setTimeout(function () {
@@ -3018,7 +3704,7 @@ const server = http.createServer(async (req, res) => {
       }, null, 2));
     }
 
-    if (req.method === "GET" && u.pathname === "/warm") {
+    if ((req.method === "GET" || req.method === "POST") && u.pathname === "/warm") {
       const result = await doWarm();
       return send(res, result.ok ? 200 : 500, "application/json; charset=utf-8", JSON.stringify(result, null, 2));
     }
@@ -3029,15 +3715,17 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true, apiKey: nextApiKey }, null, 2));
     }
 
-    if (req.method === "GET" && u.pathname === "/cache/clear") {
+    if ((req.method === "GET" || req.method === "POST") && u.pathname === "/cache/clear") {
       const s = searchCache.size;
       const m = magnetCache.size;
+      const i = imdbTitleCache.size;
       searchCache.clear();
       magnetCache.clear();
-      return send(res, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true, clearedSearches: s, clearedMagnets: m }, null, 2));
+      imdbTitleCache.clear();
+      return send(res, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true, clearedSearches: s, clearedMagnets: m, clearedImdbTitles: i }, null, 2));
     }
 
-    if (req.method === "GET" && u.pathname === "/session/reset") {
+    if ((req.method === "GET" || req.method === "POST") && u.pathname === "/session/reset") {
       await withSessionLock(async () => {
         await destroySessionUnlocked();
       });
@@ -3076,19 +3764,25 @@ module.exports = {
   normalizeMagnet,
   normalizeImdbId,
   normalizeTitle,
+  parseSizeToBytes,
   parseDateToRfc822,
   decodeEntities,
   xmlEscape,
   torznabCapsXml,
   torznabResultsXml,
+  extractSearchInputs,
   buildSearchQuery,
   buildBrowsePath,
+  applyEnvOverrides,
   parseResults,
   filterItemsByCategory,
   resolveItemCategories,
   mergeSearchItems,
   resolveImdbTitle,
   paginateItems,
+  SUPPORTED_UI_LANGS,
+  UI_I18N,
+  resolveUiLang,
   setLimitedCache,
   fsCall,
   getConfig: () => config,

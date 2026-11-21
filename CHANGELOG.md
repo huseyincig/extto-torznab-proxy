@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.6 — 2026-11-21
+
+- **Auto-Detected 8-Language Multilingual Web UI (`server.js`)**: Expanded automatic browser language detection (`navigator.languages` / `navigator.language`, `SUPPORTED_UI_LANGS`, `UI_I18N`, `resolveUiLang()`) to support **English (`en`)**, **Turkish (`tr`)**, **Spanish (`es`)**, **Russian (`ru`)**, **Portuguese (`pt`)**, **French (`fr`)**, **German (`de`)**, and **Polish (`pl`)** with 100% key parity across all 82 UI strings.
+- **Prowlarr `{ImdbId:...}` & `q=tt...` Token Extraction (`server.js`)**: Added `extractSearchInputs()` to automatically extract IMDb IDs passed inside `q` (`{ImdbId:tt0903747}`, `{ImdbId:903747}`, or `tt0903747`) during Prowlarr searches and trigger the hybrid IMDb + title search pipeline while requiring the `tt` prefix in free text so numeric titles (`90210`, `1917`) are never misclassified.
+- **Native Docker Environment Variable Overrides (`server.js`, `examples/docker-compose.yml`)**: Added `applyEnvOverrides()` directly in `loadConfig()` to support `FLARESOLVERR_URL` (for FlareSolverr or compatible services such as Byparr), `BASE_URL`, `PUBLIC_URL`, `SESSION_NAME`, and `API_KEY` environment variables without requiring an external wrapper script.
+- **Unsupported External ID Query Guard (`server.js`)**: When a caller queries by an unsupported external ID parameter (`tmdbid`, `tvdbid`, `tvmazeid`, `rid`, `traktid`, `doubanid`) or by `imdbid` while `enableImdbSearch` is disabled—without a title `q`—`/api` now returns an empty Torznab `<channel>` immediately instead of falling back to `q=warm` and returning unrelated `"warm"` torrents.
+- **HTML Parser, Date/Size & Reverse Proxy Hardening (`server.js`)**:
+  - `decodeEntities()`: Added `safeFromCodePoint()` bounds checking (`0..0x10FFFF`, excluding UTF-16 surrogates `0xD800..0xDFFF`) and case-insensitive entity matching (`/&nbsp;/gi`) so malformed numeric entities (`&#99999999;`) never throw `RangeError`.
+  - `parseSizeToBytes()`: Differentiated thousands-separator commas (`1,234.56 MB`) from decimal commas (`1,5 GB`) and guarded against `NaN` so `<size>NaN</size>` is never emitted.
+  - `parseDateToRfc822()`: Restricted the fallback `new Date(text)` parser to strings containing a 4-digit year (`19xx` / `20xx`) so bare numbers (`"5"`, `"12"`) are never parsed by V8 as year `2001`.
+  - `toRelativeTorrentPath()`: Normalized absolute mirror URLs (`https://ext.to/...`) in `findTorrentAnchor()` and `parseResults()` to relative pathnames so cross-mirror links are never dropped.
+  - `getPublicBaseUrl()`: Added `X-Forwarded-Proto` (`https`/`http`) and `X-Forwarded-Host` support for reverse proxy deployments when `publicUrl` is empty.
+  - `/warm`, `/cache/clear`, `/session/reset` & `saveConfig()`: Enabled both `GET` and `POST` methods on action endpoints, included `imdbTitleCache` in cache eviction/clearing, cleared stale search cache on `baseUrl`/`publicUrl` changes, and stopped the warm timer immediately when `warmEnabled` is unchecked.
+- **GitHub Actions Buildx Caching (`.github/workflows/docker-image.yml`, `.github/workflows/docker-publish.yml`)**: Added `cache-from: type=gha` and `cache-to: type=gha,mode=max` to accelerate multi-arch container builds.
+- **Acknowledgments**: Special thanks to [@ryandash](https://github.com/ryandash) for the ideas around Prowlarr `{ImdbId:...}` / `q=tt...` query token handling, `FLARESOLVERR_URL` environment variable configuration for FlareSolverr-compatible endpoints (such as Byparr), and GitHub Actions Buildx caching.
+- **Verification**: 37/37 unit & regression tests passing (`npm test`).
+
 ## 1.0.5 — 2026-11-21
 
 - **Hybrid IMDb + Title Search Architecture (`server.js`)**: When `imdbid` is queried (`t=tvsearch` or `t=movie`), the proxy now combines three search strategies and deduplicates by torrent ID (`mergeSearchItems`):

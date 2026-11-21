@@ -4,8 +4,8 @@ const http = require("node:http");
 
 const srv = require("../server.js");
 
-test("APP_VERSION is 1.0.5", () => {
-  assert.equal(srv.APP_VERSION, "1.0.5");
+test("APP_VERSION is 1.0.6", () => {
+  assert.equal(srv.APP_VERSION, "1.0.6");
 });
 
 test("parseDateToRfc822: parses relative ages accurately instead of current time or year 2001", () => {
@@ -407,4 +407,167 @@ test("resolveItemCategories: maps unclassified (7000) items to advertised catego
   const generalResolved = srv.resolveItemCategories(rawItems, "2000,5000,5070", "search");
   assert.deepEqual(generalResolved.map((x) => x.category), [5000, 2000, 5000]);
 });
+
+test("UI_I18N and resolveUiLang: supports automatic browser language detection across 8 languages with complete key parity", () => {
+  const expectedLangs = ["en", "tr", "es", "ru", "pt", "fr", "de", "pl"];
+  assert.deepEqual(srv.SUPPORTED_UI_LANGS, expectedLangs);
+
+  assert.equal(srv.resolveUiLang(["tr-TR", "en-US"]), "tr");
+  assert.equal(srv.resolveUiLang(["es-MX", "en"]), "es");
+  assert.equal(srv.resolveUiLang(["ru-RU"]), "ru");
+  assert.equal(srv.resolveUiLang(["pt-BR", "pt"]), "pt");
+  assert.equal(srv.resolveUiLang(["fr-CA"]), "fr");
+  assert.equal(srv.resolveUiLang(["de-AT"]), "de");
+  assert.equal(srv.resolveUiLang(["pl-PL"]), "pl");
+  assert.equal(srv.resolveUiLang(["ja-JP", "pt-PT"]), "pt");
+  assert.equal(srv.resolveUiLang(["ja-JP"]), "en");
+  assert.equal(srv.resolveUiLang(""), "en");
+
+  const enKeys = Object.keys(srv.UI_I18N.en).sort();
+  assert.ok(enKeys.length >= 60);
+
+  for (const code of expectedLangs) {
+    assert.ok(srv.UI_I18N[code], `Missing UI_I18N dictionary for ${code}`);
+    const langKeys = Object.keys(srv.UI_I18N[code]).sort();
+    assert.deepEqual(langKeys, enKeys, `Key mismatch in UI_I18N.${code}`);
+    for (const k of enKeys) {
+      assert.ok(typeof srv.UI_I18N[code][k] === "string" && srv.UI_I18N[code][k].trim().length > 0, `Empty translation for ${code}.${k}`);
+    }
+  }
+});
+
+test("extractSearchInputs: extracts IMDb ID from Prowlarr {ImdbId:...} or tt-prefixed q tokens without misclassifying numeric titles", () => {
+  // Prowlarr {ImdbId:tt...} token in q
+  const p1 = srv.extractSearchInputs(new URLSearchParams("t=search&q=%7BImdbId%3Att0903747%7D"));
+  assert.equal(p1.imdbId, "tt0903747");
+  assert.equal(p1.rawQ, "");
+  assert.equal(p1.q, "");
+
+  // Prowlarr {ImdbId:digits} with episode token in q
+  const p2 = srv.extractSearchInputs(new URLSearchParams("t=tvsearch&q=%7BImdbId%3A903747%7D+Season+1+Ep+2"));
+  assert.equal(p2.imdbId, "tt0903747");
+  assert.equal(p2.q, "S01E02");
+
+  // Raw tt1234567 in q + season/ep params
+  const p3 = srv.extractSearchInputs(new URLSearchParams("t=tvsearch&q=tt0903747&season=1&ep=3"));
+  assert.equal(p3.imdbId, "tt0903747");
+  assert.equal(p3.rawQ, "");
+  assert.equal(p3.q, "S01E03");
+
+  // Numeric movie/show titles like "90210" or "1917" must NOT be mistaken for IMDb IDs
+  const p4 = srv.extractSearchInputs(new URLSearchParams("t=tvsearch&q=90210&season=1"));
+  assert.equal(p4.imdbId, "");
+  assert.equal(p4.rawQ, "90210");
+  assert.equal(p4.q, "90210 S01");
+
+  const p5 = srv.extractSearchInputs(new URLSearchParams("t=movie&q=1917"));
+  assert.equal(p5.imdbId, "");
+  assert.equal(p5.rawQ, "1917");
+  assert.equal(p5.q, "1917");
+});
+
+test("applyEnvOverrides: applies FLARESOLVERR_URL, BASE_URL, PUBLIC_URL, SESSION_NAME, and API_KEY environment variables", () => {
+  const base = {
+    baseUrl: "https://extranet.torrentbay.st",
+    publicUrl: "",
+    flaresolverrUrl: "http://flaresolverr:8191/v1",
+    sessionName: "extto_persistent",
+    apiKey: "defaultkey"
+  };
+
+  const overridden = srv.applyEnvOverrides(base, {
+    FLARESOLVERR_URL: " http://byparr:8191/v1 ",
+    BASE_URL: "https://ext.to/",
+    PUBLIC_URL: "http://192.168.1.50:8998/",
+    SESSION_NAME: " custom_session ",
+    API_KEY: " env_api_key "
+  });
+
+  assert.equal(overridden.flaresolverrUrl, "http://byparr:8191/v1");
+  assert.equal(overridden.baseUrl, "https://ext.to");
+  assert.equal(overridden.publicUrl, "http://192.168.1.50:8998");
+  assert.equal(overridden.sessionName, "custom_session");
+  assert.equal(overridden.apiKey, "env_api_key");
+
+  // Empty env leaves config unchanged
+  const unchanged = srv.applyEnvOverrides(base, {});
+  assert.deepEqual(unchanged, base);
+});
+
+test("decodeEntities: does not throw RangeError on out-of-range or surrogate numeric HTML entities and decodes uppercase &NBSP;", () => {
+  assert.doesNotThrow(() => srv.decodeEntities("Title &#99999999; &#x110000; &#55296; &NBSP; Test"));
+  assert.equal(srv.decodeEntities("Hello&NBSP;World &#99999999;"), "Hello World &#99999999;");
+});
+
+test("parseSizeToBytes: handles comma thousands separators (1,234.56 MB) and invalid numbers without returning NaN", () => {
+  assert.equal(srv.parseSizeToBytes("1,234.56 MB"), Math.floor(1234.56 * 1024 * 1024));
+  assert.equal(srv.parseSizeToBytes("1,5 GB"), Math.floor(1.5 * 1024 * 1024 * 1024));
+  assert.equal(srv.parseSizeToBytes("... GB"), 0);
+  assert.equal(Number.isNaN(srv.parseSizeToBytes("1,234.56 MB")), false);
+  assert.equal(Number.isNaN(srv.parseSizeToBytes("... GB")), false);
+});
+
+test("parseDateToRfc822: does not parse bare numbers (e.g. '5' or '12') as year 2001", () => {
+  const fixedNow = Date.UTC(2026, 10, 21, 12, 0, 0);
+  assert.equal(srv.parseDateToRfc822("5", fixedNow), new Date(fixedNow).toUTCString());
+  assert.equal(srv.parseDateToRfc822("12", fixedNow), new Date(fixedNow).toUTCString());
+  assert.equal(srv.parseDateToRfc822("2024-05-10", fixedNow), new Date("2024-05-10").toUTCString());
+});
+
+test("parseResults: handles absolute mirror URLs in torrent links and X-Forwarded-Proto/Host headers", () => {
+  const html = `<table class="search-table"><tr>
+    <td><a href="https://ext.to/tv/show-s01e01-54321/">Show.S01E01.1080p.WEB-DL</a><a href="https://ext.to/tv/">TV</a></td>
+    <td>1,234.5 MB</td><td>2</td><td>1 hour</td><td>100</td><td>10</td>
+  </tr></table>`;
+
+  const items = srv.parseResults(html, {
+    headers: {
+      "x-forwarded-proto": "https",
+      "x-forwarded-host": "torznab.example.com"
+    }
+  });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].id, "54321");
+  assert.equal(items[0].relPath, "/tv/show-s01e01-54321/");
+  assert.equal(items[0].category, 5000);
+  assert.equal(items[0].downloadUrl, "https://torznab.example.com/download?id=54321&path=%2Ftv%2Fshow-s01e01-54321%2F");
+});
+
+test("/api and /cache/clear: returns empty feed on unsupported ID-only queries (tmdbid/tvdbid or disabled imdbid) instead of warm results, and accepts POST on /cache/clear", async () => {
+  const prevKey = srv.getConfig().apiKey;
+  const prevImdb = srv.getConfig().enableImdbSearch;
+  srv.setConfigForTest({ apiKey: "", enableImdbSearch: false });
+
+  const server = srv.server;
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+
+  try {
+    // 1. imdbid-only query while enableImdbSearch is false must return empty <channel> without calling FlareSolverr for "warm"
+    const r1 = await fetch(`http://127.0.0.1:${port}/api?t=movie&imdbid=tt15239678`);
+    assert.equal(r1.status, 200);
+    const xml1 = await r1.text();
+    assert.doesNotMatch(xml1, /<item>/);
+
+    // 2. tmdbid-only or tvdbid-only query without q/imdbid must return empty <channel>
+    srv.setConfigForTest({ enableImdbSearch: true });
+    const r2 = await fetch(`http://127.0.0.1:${port}/api?t=tvsearch&tvdbid=81189&season=1`);
+    assert.equal(r2.status, 200);
+    const xml2 = await r2.text();
+    assert.doesNotMatch(xml2, /<item>/);
+
+    // 3. POST /cache/clear must succeed with 200
+    const r3 = await fetch(`http://127.0.0.1:${port}/cache/clear`, { method: "POST" });
+    assert.equal(r3.status, 200);
+    const j3 = await r3.json();
+    assert.equal(j3.ok, true);
+  } finally {
+    await new Promise((r) => server.close(r));
+    srv.setConfigForTest({ apiKey: prevKey, enableImdbSearch: prevImdb });
+  }
+});
+
+
+
 
