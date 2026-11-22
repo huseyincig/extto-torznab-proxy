@@ -4,7 +4,7 @@ const path = require("path");
 const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || "8998");
-const APP_VERSION = "1.0.6";
+const APP_VERSION = "1.0.7";
 const CONFIG_DIR = process.env.CONFIG_DIR || "/config";
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
@@ -556,6 +556,91 @@ function normalizeImdbId(value) {
   return `tt${digits.padStart(7, "0")}`;
 }
 
+const SORT_FIELD_ALIASES = {
+  age: "age",
+  created: "age",
+  date: "age",
+  time: "age",
+  seed: "seed",
+  seeds: "seed",
+  seeders: "seed",
+  leech: "leech",
+  leechs: "leech",
+  leechers: "leech",
+  peers: "leech",
+  size: "size",
+  files: "files",
+  comments: "comments"
+};
+
+function extractBrowseFilters(params) {
+  if (!params || typeof params.get !== "function") {
+    return {
+      userNick: "",
+      sort: "",
+      order: "",
+      age: "",
+      extCat: "",
+      subCat: "",
+      page: "",
+      withAdult: "",
+      hasFilters: false
+    };
+  }
+
+  const rawUserNick = String(params.get("user_nick") ?? params.get("uploader") ?? "")
+    .replace(/[\x00-\x1F\x7F]/g, "")
+    .trim()
+    .slice(0, 64);
+  const userNick = /^[\w.-]+$/.test(rawUserNick) ? rawUserNick : "";
+
+  const rawSort = String(params.get("sort") || "").trim().toLowerCase();
+  const sort = SORT_FIELD_ALIASES[rawSort] || "";
+
+  const rawOrder = String(params.get("order") || "").trim().toLowerCase();
+  const order = rawOrder === "asc" || rawOrder === "desc" ? rawOrder : "";
+
+  const rawAge = String(params.get("age") ?? "").trim();
+  const age = /^[0-4]$/.test(rawAge) ? rawAge : "";
+
+  const rawExtCat = String(params.get("ext_cat") ?? params.get("site_cat") ?? "").trim();
+  const rawCat = String(params.get("cat") ?? "").trim();
+  let extCat = "";
+  if (/^(?:[1-8]|10)$/.test(rawExtCat)) {
+    extCat = rawExtCat;
+  } else if (/^(?:[1-8]|10)$/.test(rawCat)) {
+    extCat = rawCat;
+  }
+
+  const rawSubCat = String(params.get("sub_cat") ?? "").trim();
+  const subCat = /^\d{1,3}$/.test(rawSubCat) && Number(rawSubCat) > 0 ? String(Number(rawSubCat)) : "";
+
+  const rawPage = String(params.get("page") ?? "").trim();
+  const page = /^\d{1,3}$/.test(rawPage) && Number(rawPage) >= 1 && Number(rawPage) <= 100 ? String(Number(rawPage)) : "";
+
+  const rawWithAdult = String(params.get("with_adult") ?? "").trim().toLowerCase();
+  let withAdult = "";
+  if (rawWithAdult === "1" || rawWithAdult === "true") {
+    withAdult = "1";
+  } else if (rawWithAdult === "0" || rawWithAdult === "false") {
+    withAdult = "0";
+  }
+
+  const hasFilters = Boolean(userNick || sort || order || age || extCat || subCat || page);
+
+  return {
+    userNick,
+    sort,
+    order,
+    age,
+    extCat,
+    subCat,
+    page,
+    withAdult,
+    hasFilters
+  };
+}
+
 function extractSearchInputs(params) {
   const imdbEnabled = config.enableImdbSearch !== false;
   const anyImdbParam = String(params.get("imdbid") ?? params.get("imdb_id") ?? "").trim();
@@ -583,15 +668,17 @@ function extractSearchInputs(params) {
     ? (rawImdbParam ? normalizeImdbId(rawImdbParam) : extractedImdb)
     : "";
 
+  const filters = extractBrowseFilters(params);
+
   const hasOtherExternalId = ["tmdbid", "tvdbid", "tvmazeid", "rid", "traktid", "doubanid"].some(
     k => String(params.get(k) || "").trim().length > 0
   );
   const hasDisabledImdbOnly = !imdbEnabled && Boolean(anyImdbParam);
-  const unsupportedIdOnly = !rawQ && !imdbId && (hasOtherExternalId || hasDisabledImdbOnly);
+  const unsupportedIdOnly = !rawQ && !imdbId && !filters.hasFilters && (hasOtherExternalId || hasDisabledImdbOnly);
 
   let q = rawQ;
 
-  if (!q && !imdbId && !unsupportedIdOnly) {
+  if (!q && !imdbId && !unsupportedIdOnly && !filters.hasFilters) {
     q = config.warmQuery || "warm";
   }
 
@@ -622,7 +709,7 @@ function extractSearchInputs(params) {
     q = normalizeSearchQueryText(q);
   }
 
-  if (!q && !imdbId && !unsupportedIdOnly) {
+  if (!q && !imdbId && !unsupportedIdOnly && !filters.hasFilters) {
     q = config.warmQuery || "warm";
   }
 
@@ -637,26 +724,30 @@ function extractSearchInputs(params) {
     titleOnlyQ,
     imdbId,
     rawImdbParam,
-    unsupportedIdOnly
+    unsupportedIdOnly,
+    filters
   };
 }
 
 function buildSearchQuery(params) {
-  const { q, imdbId } = extractSearchInputs(params);
+  const { q, imdbId, filters } = extractSearchInputs(params);
 
   log("[query]", "built", JSON.stringify({
     t: params.get("t") || "",
     q,
     imdbId,
     season: params.get("season") || "",
-    ep: params.get("ep") || params.get("episode") || ""
+    ep: params.get("ep") || params.get("episode") || "",
+    ...(filters.hasFilters ? { filters } : {})
   }));
 
   return q;
 }
 
-function buildBrowsePath(q, imdbId = "") {
-  const withAdult = config.withAdult ? "1" : "0";
+function buildBrowsePath(q, imdbId = "", filters = null) {
+  const withAdult = filters && filters.withAdult
+    ? filters.withAdult
+    : (config.withAdult ? "1" : "0");
   const normalizedImdb = normalizeImdbId(imdbId);
   const queryText = String(q || "").trim();
   const parts = [];
@@ -669,6 +760,30 @@ function buildBrowsePath(q, imdbId = "") {
     parts.push(`imdb_id=${encodeURIComponent(normalizedImdb)}`);
   }
 
+  if (filters) {
+    if (filters.userNick) {
+      parts.push(`user_nick=${encodeURIComponent(filters.userNick)}`);
+    }
+    if (filters.extCat) {
+      parts.push(`cat=${encodeURIComponent(filters.extCat)}`);
+    }
+    if (filters.subCat) {
+      parts.push(`sub_cat=${encodeURIComponent(filters.subCat)}`);
+    }
+    if (filters.age) {
+      parts.push(`age=${encodeURIComponent(filters.age)}`);
+    }
+    if (filters.sort) {
+      parts.push(`sort=${encodeURIComponent(filters.sort)}`);
+    }
+    if (filters.order) {
+      parts.push(`order=${encodeURIComponent(filters.order)}`);
+    }
+    if (filters.page) {
+      parts.push(`page=${encodeURIComponent(filters.page)}`);
+    }
+  }
+
   if (!parts.length) {
     const fallback = config.warmQuery || "warm";
     parts.push(`q=${encodeURIComponent(fallback).replace(/%20/g, "+")}`);
@@ -679,9 +794,9 @@ function buildBrowsePath(q, imdbId = "") {
   return `/browse/?${parts.join("&")}`;
 }
 
-async function fetchBrowse(q, imdbId = "") {
+async function fetchBrowse(q, imdbId = "", filters = null) {
   const baseUrl = normalizeBaseUrl(config.baseUrl);
-  const searchPath = buildBrowsePath(q, imdbId);
+  const searchPath = buildBrowsePath(q, imdbId, filters);
   const targetUrl = baseUrl + searchPath;
   const cacheKey = targetUrl;
   const cached = getCache(searchCache, cacheKey);
@@ -1200,7 +1315,7 @@ async function handleApi(req, res, u) {
 
   if (t === "search" || t === "movie" || t === "tvsearch") {
     const imdbEnabled = config.enableImdbSearch !== false;
-    const { imdbId, rawImdbParam, titleOnlyQ, unsupportedIdOnly } = extractSearchInputs(u.searchParams);
+    const { imdbId, rawImdbParam, titleOnlyQ, unsupportedIdOnly, filters } = extractSearchInputs(u.searchParams);
 
     if (imdbEnabled && rawImdbParam && !normalizeImdbId(rawImdbParam)) {
       return send(res, 400, "application/xml; charset=utf-8", torznabErrorXml(201, "Incorrect parameter (imdbid)"));
@@ -1212,14 +1327,14 @@ async function handleApi(req, res, u) {
 
     try {
       const q = buildSearchQuery(u.searchParams);
-      const html = await fetchBrowse(q, imdbId);
+      const html = await fetchBrowse(q, imdbId, filters);
       let parsed = parseResults(html, req).map(it => (imdbId ? { ...it, imdbId } : it));
 
       if (imdbId) {
         let seasonPackItems = [];
         if (/^S\d{2}$/i.test(q)) {
           try {
-            const htmlImdbAll = await fetchBrowse("", imdbId);
+            const htmlImdbAll = await fetchBrowse("", imdbId, filters);
             seasonPackItems = parseResults(htmlImdbAll, req).map(it => ({ ...it, imdbId }));
           } catch (e) {
             warn("[api] secondary imdb pack fetch ignored:", e.message || e);
@@ -1240,7 +1355,7 @@ async function handleApi(req, res, u) {
 
             if (fallbackQ) {
               try {
-                const htmlTitle = await fetchBrowse(fallbackQ, "");
+                const htmlTitle = await fetchBrowse(fallbackQ, "", filters);
                 titleItems = parseResults(htmlTitle, req);
               } catch (e) {
                 warn("[api] secondary title fetch ignored:", e.message || e);
@@ -1776,6 +1891,41 @@ const UI_I18N = {
     sessionResetOk: "Session reset completed",
     actionFailed: "Action failed",
     save: "Save Settings",
+    rssBuilderTitle: "RSS & Filtered Feed URL Builder (qBittorrent / RSS)",
+    rssBuilderDesc: "Build custom Torznab RSS feed URLs filtered by uploader, category, sort order or age without changing your global Prowlarr settings.",
+    rssUserNick: "Uploader (user_nick)",
+    rssUserNickHint: "Optional EXT uploader nickname (e.g. PSA, QxR, MeGusta).",
+    rssKeyword: "Keyword (q)",
+    rssKeywordHint: "Optional keyword filter. Leave empty to follow all uploads matching the filters.",
+    rssCategory: "Site Category (ext_cat)",
+    rssCatAll: "All Categories",
+    rssCatMovies: "Movies (1)",
+    rssCatTv: "TV (2)",
+    rssCatAnime: "Anime (7)",
+    rssCatMusic: "Music (3)",
+    rssCatGames: "Games (4)",
+    rssCatApps: "Applications (5)",
+    rssCatBooks: "Books (6)",
+    rssCatOther: "Other (8)",
+    rssSort: "Sort By (sort)",
+    rssSortAge: "Upload Date / Age (age)",
+    rssSortSeed: "Seeders (seed)",
+    rssSortLeech: "Leechers (leech)",
+    rssSortSize: "Size (size)",
+    rssSortFiles: "File Count (files)",
+    rssSortComments: "Comments (comments)",
+    rssOrder: "Sort Order (order)",
+    rssOrderDesc: "Descending (desc)",
+    rssOrderAsc: "Ascending (asc)",
+    rssAge: "Time Range (age)",
+    rssAgeAny: "Any Time",
+    rssAge0: "Last 24 Hours (0)",
+    rssAge1: "Last 3 Days (1)",
+    rssAge2: "Last Week (2)",
+    rssAge3: "Last 2 Weeks (3)",
+    rssAge4: "Last Month (4)",
+    rssGeneratedUrl: "Generated RSS URL",
+    rssOpenXml: "Open XML",
     footer: "EXT Torznab Proxy runs locally. Keep this page inside your trusted network."
   },
   tr: {
@@ -1860,6 +2010,41 @@ const UI_I18N = {
     sessionResetOk: "Session sıfırlandı",
     actionFailed: "İşlem başarısız",
     save: "Ayarları Kaydet",
+    rssBuilderTitle: "RSS ve Filtreli Besleme URL Oluşturucu (qBittorrent / RSS)",
+    rssBuilderDesc: "Genel Prowlarr ayarlarınızı bozmadan yükleyici, kategori, sıralama veya zamana göre özel Torznab RSS takip linki oluşturun.",
+    rssUserNick: "Yükleyici (user_nick)",
+    rssUserNickHint: "İsteğe bağlı EXT yükleyici adı (örn. PSA, QxR, MeGusta).",
+    rssKeyword: "Arama Kelimesi (q)",
+    rssKeywordHint: "İsteğe bağlı kelime filtresi. Filtreye uyan tüm paylaşımları takip etmek için boş bırakın.",
+    rssCategory: "Site Kategorisi (ext_cat)",
+    rssCatAll: "Tüm Kategoriler",
+    rssCatMovies: "Film / Movies (1)",
+    rssCatTv: "Dizi / TV (2)",
+    rssCatAnime: "Anime (7)",
+    rssCatMusic: "Müzik / Music (3)",
+    rssCatGames: "Oyun / Games (4)",
+    rssCatApps: "Uygulama / Apps (5)",
+    rssCatBooks: "Kitap / Books (6)",
+    rssCatOther: "Diğer / Other (8)",
+    rssSort: "Sıralama Ölçütü (sort)",
+    rssSortAge: "Yüklenme Tarihi / Yaş (age)",
+    rssSortSeed: "Seeder Sayısı (seed)",
+    rssSortLeech: "Leecher Sayısı (leech)",
+    rssSortSize: "Boyut (size)",
+    rssSortFiles: "Dosya Sayısı (files)",
+    rssSortComments: "Yorum Sayısı (comments)",
+    rssOrder: "Sıralama Yönü (order)",
+    rssOrderDesc: "Azalan / En Yeni (desc)",
+    rssOrderAsc: "Artan / En Eski (asc)",
+    rssAge: "Zaman Aralığı (age)",
+    rssAgeAny: "Tüm Zamanlar",
+    rssAge0: "Son 24 Saat (0)",
+    rssAge1: "Son 3 Gün (1)",
+    rssAge2: "Son 1 Hafta (2)",
+    rssAge3: "Son 2 Hafta (3)",
+    rssAge4: "Son 1 Ay (4)",
+    rssGeneratedUrl: "Oluşturulan RSS Linki",
+    rssOpenXml: "XML Aç",
     footer: "EXT Torznab Proxy yerel ağda çalışır. Bu sayfayı güvenilir ağ içinde tutun."
   },
   es: {
@@ -1944,6 +2129,41 @@ const UI_I18N = {
     sessionResetOk: "Sesión reiniciada",
     actionFailed: "Acción fallida",
     save: "Guardar Configuración",
+    rssBuilderTitle: "Generador de URL RSS y Feeds Filtrados (qBittorrent / RSS)",
+    rssBuilderDesc: "Cree enlaces RSS Torznab personalizados filtrados por uploader, categoría, orden o antigüedad sin alterar la configuración de Prowlarr.",
+    rssUserNick: "Uploader (user_nick)",
+    rssUserNickHint: "Nombre de usuario del uploader en EXT opcional (ej. PSA, QxR, MeGusta).",
+    rssKeyword: "Palabra clave (q)",
+    rssKeywordHint: "Filtro de texto opcional. Déjelo vacío para seguir todas las subidas que coincidan.",
+    rssCategory: "Categoría del Sitio (ext_cat)",
+    rssCatAll: "Todas las categorías",
+    rssCatMovies: "Películas (1)",
+    rssCatTv: "TV (2)",
+    rssCatAnime: "Anime (7)",
+    rssCatMusic: "Música (3)",
+    rssCatGames: "Juegos (4)",
+    rssCatApps: "Aplicaciones (5)",
+    rssCatBooks: "Libros (6)",
+    rssCatOther: "Otros (8)",
+    rssSort: "Ordenar por (sort)",
+    rssSortAge: "Fecha / Antigüedad (age)",
+    rssSortSeed: "Seeders (seed)",
+    rssSortLeech: "Leechers (leech)",
+    rssSortSize: "Tamaño (size)",
+    rssSortFiles: "Archivos (files)",
+    rssSortComments: "Comentarios (comments)",
+    rssOrder: "Dirección (order)",
+    rssOrderDesc: "Descendente (desc)",
+    rssOrderAsc: "Ascendente (asc)",
+    rssAge: "Rango de Tiempo (age)",
+    rssAgeAny: "Cualquier momento",
+    rssAge0: "Últimas 24 horas (0)",
+    rssAge1: "Últimos 3 días (1)",
+    rssAge2: "Última semana (2)",
+    rssAge3: "Últimas 2 semanas (3)",
+    rssAge4: "Último mes (4)",
+    rssGeneratedUrl: "URL RSS Generada",
+    rssOpenXml: "Abrir XML",
     footer: "EXT Torznab Proxy se ejecuta localmente. Mantenga esta página dentro de su red de confianza."
   },
   ru: {
@@ -2028,6 +2248,41 @@ const UI_I18N = {
     sessionResetOk: "Сессия сброшена",
     actionFailed: "Ошибка выполнения",
     save: "Сохранить настройки",
+    rssBuilderTitle: "Конструктор RSS-ссылок и фильтров (qBittorrent / RSS)",
+    rssBuilderDesc: "Создавайте собственные ссылки Torznab RSS с фильтрацией по автору, категории, сортировке или дате без изменения настроек Prowlarr.",
+    rssUserNick: "Автор / Аплоадер (user_nick)",
+    rssUserNickHint: "Необязательный ник автора на EXT (например, PSA, QxR, MeGusta).",
+    rssKeyword: "Ключевое слово (q)",
+    rssKeywordHint: "Необязательный фильтр по слову. Оставьте пустым для отслеживания всех раздач.",
+    rssCategory: "Категория сайта (ext_cat)",
+    rssCatAll: "Все категории",
+    rssCatMovies: "Фильмы (1)",
+    rssCatTv: "Сериалы / ТВ (2)",
+    rssCatAnime: "Аниме (7)",
+    rssCatMusic: "Музыка (3)",
+    rssCatGames: "Игры (4)",
+    rssCatApps: "Программы (5)",
+    rssCatBooks: "Книги (6)",
+    rssCatOther: "Другое (8)",
+    rssSort: "Сортировка (sort)",
+    rssSortAge: "По дате / возрасту (age)",
+    rssSortSeed: "По сидам (seed)",
+    rssSortLeech: "По личам (leech)",
+    rssSortSize: "По размеру (size)",
+    rssSortFiles: "По числу файлов (files)",
+    rssSortComments: "По комментариям (comments)",
+    rssOrder: "Порядок (order)",
+    rssOrderDesc: "По убыванию (desc)",
+    rssOrderAsc: "По возрастанию (asc)",
+    rssAge: "Период времени (age)",
+    rssAgeAny: "За всё время",
+    rssAge0: "За последние 24 часа (0)",
+    rssAge1: "За последние 3 дня (1)",
+    rssAge2: "За последнюю неделю (2)",
+    rssAge3: "За последние 2 недели (3)",
+    rssAge4: "За последний месяц (4)",
+    rssGeneratedUrl: "Готовая RSS-ссылка",
+    rssOpenXml: "Открыть XML",
     footer: "EXT Torznab Proxy работает локально. Держите эту страницу в доверенной сети."
   },
   pt: {
@@ -2112,6 +2367,41 @@ const UI_I18N = {
     sessionResetOk: "Sessão redefinida",
     actionFailed: "Falha na ação",
     save: "Salvar Configurações",
+    rssBuilderTitle: "Gerador de URL RSS e Feeds Filtrados (qBittorrent / RSS)",
+    rssBuilderDesc: "Crie URLs de feed RSS Torznab personalizados filtrados por uploader, categoria, ordem ou período sem alterar suas configurações do Prowlarr.",
+    rssUserNick: "Uploader (user_nick)",
+    rssUserNickHint: "Nome de usuário opcional do uploader no EXT (ex.: PSA, QxR, MeGusta).",
+    rssKeyword: "Palavra-chave (q)",
+    rssKeywordHint: "Filtro de palavra opcional. Deixe em branco para seguir todos os envios.",
+    rssCategory: "Categoria do Site (ext_cat)",
+    rssCatAll: "Todas as Categorias",
+    rssCatMovies: "Filmes (1)",
+    rssCatTv: "TV (2)",
+    rssCatAnime: "Anime (7)",
+    rssCatMusic: "Música (3)",
+    rssCatGames: "Jogos (4)",
+    rssCatApps: "Aplicativos (5)",
+    rssCatBooks: "Livros (6)",
+    rssCatOther: "Outros (8)",
+    rssSort: "Ordenar Por (sort)",
+    rssSortAge: "Data / Idade (age)",
+    rssSortSeed: "Seeders (seed)",
+    rssSortLeech: "Leechers (leech)",
+    rssSortSize: "Tamanho (size)",
+    rssSortFiles: "Arquivos (files)",
+    rssSortComments: "Comentários (comments)",
+    rssOrder: "Direção (order)",
+    rssOrderDesc: "Decrescente (desc)",
+    rssOrderAsc: "Crescente (asc)",
+    rssAge: "Período (age)",
+    rssAgeAny: "Qualquer Período",
+    rssAge0: "Últimas 24 Horas (0)",
+    rssAge1: "Últimos 3 Dias (1)",
+    rssAge2: "Última Semana (2)",
+    rssAge3: "Últimas 2 Semanas (3)",
+    rssAge4: "Último Mês (4)",
+    rssGeneratedUrl: "URL RSS Gerada",
+    rssOpenXml: "Abrir XML",
     footer: "O EXT Torznab Proxy roda localmente. Mantenha esta página dentro da sua rede confiável."
   },
   fr: {
@@ -2196,6 +2486,41 @@ const UI_I18N = {
     sessionResetOk: "Session réinitialisée",
     actionFailed: "Échec de l'action",
     save: "Enregistrer",
+    rssBuilderTitle: "Générateur d'URL RSS et Flux Filtrés (qBittorrent / RSS)",
+    rssBuilderDesc: "Créez des URL de flux RSS Torznab personnalisées filtrées par uploader, catégorie, tri ou période sans modifier vos paramètres Prowlarr.",
+    rssUserNick: "Uploader (user_nick)",
+    rssUserNickHint: "Pseudo d'uploader EXT optionnel (ex. PSA, QxR, MeGusta).",
+    rssKeyword: "Mot-clé (q)",
+    rssKeywordHint: "Filtre de mot-clé optionnel. Laissez vide pour suivre tous les ajouts correspondants.",
+    rssCategory: "Catégorie du Site (ext_cat)",
+    rssCatAll: "Toutes les catégories",
+    rssCatMovies: "Films (1)",
+    rssCatTv: "TV (2)",
+    rssCatAnime: "Anime (7)",
+    rssCatMusic: "Musique (3)",
+    rssCatGames: "Jeux (4)",
+    rssCatApps: "Applications (5)",
+    rssCatBooks: "Livros / Livres (6)",
+    rssCatOther: "Autres (8)",
+    rssSort: "Trier Par (sort)",
+    rssSortAge: "Date d'ajout / Âge (age)",
+    rssSortSeed: "Seeders (seed)",
+    rssSortLeech: "Leechers (leech)",
+    rssSortSize: "Taille (size)",
+    rssSortFiles: "Fichiers (files)",
+    rssSortComments: "Commentaires (comments)",
+    rssOrder: "Ordre (order)",
+    rssOrderDesc: "Décroissant (desc)",
+    rssOrderAsc: "Croissant (asc)",
+    rssAge: "Période (age)",
+    rssAgeAny: "Toute période",
+    rssAge0: "Dernières 24 heures (0)",
+    rssAge1: "3 derniers jours (1)",
+    rssAge2: "Dernière semaine (2)",
+    rssAge3: "2 dernières semaines (3)",
+    rssAge4: "Dernier mois (4)",
+    rssGeneratedUrl: "URL RSS Générée",
+    rssOpenXml: "Ouvrir XML",
     footer: "EXT Torznab Proxy fonctionne localement. Gardez cette page au sein de votre réseau de confiance."
   },
   de: {
@@ -2280,6 +2605,41 @@ const UI_I18N = {
     sessionResetOk: "Sitzung zurückgesetzt",
     actionFailed: "Aktion fehlgeschlagen",
     save: "Einstellungen speichern",
+    rssBuilderTitle: "RSS- & Filter-Feed-URL-Generator (qBittorrent / RSS)",
+    rssBuilderDesc: "Erstellen Sie benutzerdefinierte Torznab-RSS-Feed-URLs nach Uploader, Kategorie, Sortierung oder Zeitraum, ohne Ihre Prowlarr-Einstellungen zu ändern.",
+    rssUserNick: "Uploader (user_nick)",
+    rssUserNickHint: "Optionaler EXT-Uploader-Benutzername (z. B. PSA, QxR, MeGusta).",
+    rssKeyword: "Suchbegriff (q)",
+    rssKeywordHint: "Optionaler Wortfilter. Leer lassen, um allen passenden Uploads zu folgen.",
+    rssCategory: "Seiten-Kategorie (ext_cat)",
+    rssCatAll: "Alle Kategorien",
+    rssCatMovies: "Filme (1)",
+    rssCatTv: "TV / Serien (2)",
+    rssCatAnime: "Anime (7)",
+    rssCatMusic: "Musik (3)",
+    rssCatGames: "Spiele (4)",
+    rssCatApps: "Anwendungen (5)",
+    rssCatBooks: "Bücher (6)",
+    rssCatOther: "Sonstiges (8)",
+    rssSort: "Sortieren nach (sort)",
+    rssSortAge: "Datum / Alter (age)",
+    rssSortSeed: "Seeders (seed)",
+    rssSortLeech: "Leechers (leech)",
+    rssSortSize: "Größe (size)",
+    rssSortFiles: "Dateianzahl (files)",
+    rssSortComments: "Kommentare (comments)",
+    rssOrder: "Reihenfolge (order)",
+    rssOrderDesc: "Absteigend (desc)",
+    rssOrderAsc: "Aufsteigend (asc)",
+    rssAge: "Zeitraum (age)",
+    rssAgeAny: "Gesamter Zeitraum",
+    rssAge0: "Letzte 24 Stunden (0)",
+    rssAge1: "Letzte 3 Tage (1)",
+    rssAge2: "Letzte Woche (2)",
+    rssAge3: "Letzte 2 Wochen (3)",
+    rssAge4: "Letzter Monat (4)",
+    rssGeneratedUrl: "Generierte RSS-URL",
+    rssOpenXml: "XML öffnen",
     footer: "EXT Torznab Proxy läuft lokal. Halten Sie diese Seite in Ihrem vertrauenswürdigen Netzwerk."
   },
   pl: {
@@ -2364,6 +2724,41 @@ const UI_I18N = {
     sessionResetOk: "Sesja zresetowana",
     actionFailed: "Operacja nie powiodła się",
     save: "Zapisz Ustawienia",
+    rssBuilderTitle: "Generator URL Kanałów RSS i Filtrów (qBittorrent / RSS)",
+    rssBuilderDesc: "Twórz własne linki RSS Torznab filtrowane według uploadera, kategorii, sortowania lub wieku bez zmiany głównych ustawień Prowlarr.",
+    rssUserNick: "Uploader (user_nick)",
+    rssUserNickHint: "Opcjonalny nick uploadera na EXT (np. PSA, QxR, MeGusta).",
+    rssKeyword: "Słowo kluczowe (q)",
+    rssKeywordHint: "Opcjonalny filtr tekstowy. Pozostaw puste, aby śledzić wszystkie pasujące wstawki.",
+    rssCategory: "Kategoria Strony (ext_cat)",
+    rssCatAll: "Wszystkie kategorie",
+    rssCatMovies: "Filmy (1)",
+    rssCatTv: "TV / Seriale (2)",
+    rssCatAnime: "Anime (7)",
+    rssCatMusic: "Muzyka (3)",
+    rssCatGames: "Gry (4)",
+    rssCatApps: "Aplikacje (5)",
+    rssCatBooks: "Książki (6)",
+    rssCatOther: "Inne (8)",
+    rssSort: "Sortuj według (sort)",
+    rssSortAge: "Data dodania / Wiek (age)",
+    rssSortSeed: "Seeders (seed)",
+    rssSortLeech: "Leechers (leech)",
+    rssSortSize: "Rozmiar (size)",
+    rssSortFiles: "Liczba plików (files)",
+    rssSortComments: "Komentarze (comments)",
+    rssOrder: "Kolejność (order)",
+    rssOrderDesc: "Malejąco (desc)",
+    rssOrderAsc: "Rosnąco (asc)",
+    rssAge: "Przedział czasu (age)",
+    rssAgeAny: "Dowolny czas",
+    rssAge0: "Ostatnie 24 godziny (0)",
+    rssAge1: "Ostatnie 3 dni (1)",
+    rssAge2: "Ostatni tydzień (2)",
+    rssAge3: "Ostatnie 2 tygodnie (3)",
+    rssAge4: "Ostatni miesiąc (4)",
+    rssGeneratedUrl: "Wygenerowany URL RSS",
+    rssOpenXml: "Otwórz XML",
     footer: "EXT Torznab Proxy działa lokalnie. Udostępniaj tę stronę wyłącznie w zaufanej sieci."
   }
 };
@@ -3135,6 +3530,85 @@ function settingsHtml(message = "") {
       </div>
     </div>
 
+    <div class="section">
+      <div class="section-head">
+        <div>
+          <h2 data-i18n="rssBuilderTitle">RSS &amp; Filtered Feed URL Builder (qBittorrent / RSS)</h2>
+          <p class="section-desc" data-i18n="rssBuilderDesc">Build custom Torznab RSS feed URLs filtered by uploader, category, sort order or age without changing your global Prowlarr settings.</p>
+        </div>
+        <a id="rssFeedOpen" class="btn small secondary" href="/api?t=search" target="_blank" data-i18n="rssOpenXml">Open XML</a>
+      </div>
+
+      <div class="grid">
+        <div class="field">
+          <label for="rssUserNick" data-i18n="rssUserNick">Uploader (user_nick)</label>
+          <input id="rssUserNick" type="text" placeholder="PSA, QxR, MeGusta..." autocomplete="off" spellcheck="false">
+          <div class="hint" data-i18n="rssUserNickHint">Optional EXT uploader nickname (e.g. PSA, QxR, MeGusta).</div>
+        </div>
+
+        <div class="field">
+          <label for="rssKeyword" data-i18n="rssKeyword">Keyword (q)</label>
+          <input id="rssKeyword" type="text" placeholder="1080p, HEVC, S01..." autocomplete="off">
+          <div class="hint" data-i18n="rssKeywordHint">Optional keyword filter. Leave empty to follow all uploads matching the filters.</div>
+        </div>
+
+        <div class="field">
+          <label for="rssExtCat" data-i18n="rssCategory">Site Category (ext_cat)</label>
+          <select id="rssExtCat">
+            <option value="" data-i18n="rssCatAll">All Categories</option>
+            <option value="1" data-i18n="rssCatMovies">Movies (1)</option>
+            <option value="2" data-i18n="rssCatTv">TV (2)</option>
+            <option value="7" data-i18n="rssCatAnime">Anime (7)</option>
+            <option value="3" data-i18n="rssCatMusic">Music (3)</option>
+            <option value="4" data-i18n="rssCatGames">Games (4)</option>
+            <option value="5" data-i18n="rssCatApps">Applications (5)</option>
+            <option value="6" data-i18n="rssCatBooks">Books (6)</option>
+            <option value="8" data-i18n="rssCatOther">Other (8)</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="rssAge" data-i18n="rssAge">Time Range (age)</label>
+          <select id="rssAge">
+            <option value="" data-i18n="rssAgeAny">Any Time</option>
+            <option value="0" data-i18n="rssAge0">Last 24 Hours (0)</option>
+            <option value="1" data-i18n="rssAge1">Last 3 Days (1)</option>
+            <option value="2" data-i18n="rssAge2">Last Week (2)</option>
+            <option value="3" data-i18n="rssAge3">Last 2 Weeks (3)</option>
+            <option value="4" data-i18n="rssAge4">Last Month (4)</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="rssSort" data-i18n="rssSort">Sort By (sort)</label>
+          <select id="rssSort">
+            <option value="age" selected data-i18n="rssSortAge">Upload Date / Age (age)</option>
+            <option value="seed" data-i18n="rssSortSeed">Seeders (seed)</option>
+            <option value="leech" data-i18n="rssSortLeech">Leechers (leech)</option>
+            <option value="size" data-i18n="rssSortSize">Size (size)</option>
+            <option value="files" data-i18n="rssSortFiles">File Count (files)</option>
+            <option value="comments" data-i18n="rssSortComments">Comments (comments)</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="rssOrder" data-i18n="rssOrder">Sort Order (order)</label>
+          <select id="rssOrder">
+            <option value="desc" selected data-i18n="rssOrderDesc">Descending (desc)</option>
+            <option value="asc" data-i18n="rssOrderAsc">Ascending (asc)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="copy-grid" style="margin-top:16px">
+        <div class="copy-line">
+          <div class="copy-label" data-i18n="rssGeneratedUrl">Generated RSS URL</div>
+          <code id="rssFeedUrl"></code>
+          <button type="button" class="btn small ghost" data-copy="rssFeedUrl" data-i18n="copy">Copy</button>
+        </div>
+      </div>
+    </div>
+
     <div class="actions">
       <div class="refresh-box">
         <label class="refresh-toggle">
@@ -3270,6 +3744,66 @@ function settingsHtml(message = "") {
   if (torznabUrl && !torznabUrl.textContent.trim()) {
     torznabUrl.textContent = window.location.origin;
   }
+
+  function updateRssBuilderUrl() {
+    var base = (torznabUrl && torznabUrl.textContent.trim()) || window.location.origin;
+    while (base.slice(-1) === "/") {
+      base = base.slice(0, -1);
+    }
+
+    var userNickEl = document.getElementById("rssUserNick");
+    var keywordEl = document.getElementById("rssKeyword");
+    var extCatEl = document.getElementById("rssExtCat");
+    var ageEl = document.getElementById("rssAge");
+    var sortEl = document.getElementById("rssSort");
+    var orderEl = document.getElementById("rssOrder");
+    var apiKeyEl = document.getElementById("apiKeyInput");
+    var feedUrlEl = document.getElementById("rssFeedUrl");
+    var feedOpenEl = document.getElementById("rssFeedOpen");
+
+    if (!feedUrlEl) return;
+
+    var params = ["t=search"];
+    var qVal = keywordEl ? keywordEl.value.trim() : "";
+    var nickVal = userNickEl ? userNickEl.value.trim() : "";
+    var catVal = extCatEl ? extCatEl.value.trim() : "";
+    var ageVal = ageEl ? ageEl.value.trim() : "";
+    var sortVal = sortEl ? sortEl.value.trim() : "";
+    var orderVal = orderEl ? orderEl.value.trim() : "";
+    var keyVal = apiKeyEl ? apiKeyEl.value.trim() : "";
+
+    if (qVal) params.push("q=" + encodeURIComponent(qVal).replace(/%20/g, "+"));
+    if (nickVal) params.push("user_nick=" + encodeURIComponent(nickVal));
+    if (catVal) params.push("ext_cat=" + encodeURIComponent(catVal));
+    if (ageVal !== "") params.push("age=" + encodeURIComponent(ageVal));
+    if (sortVal) params.push("sort=" + encodeURIComponent(sortVal));
+    if (orderVal) params.push("order=" + encodeURIComponent(orderVal));
+    if (keyVal) params.push("apikey=" + encodeURIComponent(keyVal));
+
+    var fullUrl = base + "/api?" + params.join("&");
+    feedUrlEl.textContent = fullUrl;
+    if (feedOpenEl) {
+      feedOpenEl.href = "/api?" + params.join("&");
+    }
+  }
+
+  ["rssUserNick", "rssKeyword", "rssExtCat", "rssAge", "rssSort", "rssOrder", "apiKeyInput"].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) {
+      el.addEventListener("input", updateRssBuilderUrl);
+      el.addEventListener("change", updateRssBuilderUrl);
+      if (id === "rssUserNick" || id === "rssKeyword") {
+        el.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            updateRssBuilderUrl();
+          }
+        });
+      }
+    }
+  });
+
+  updateRssBuilderUrl();
 
   function fallbackCopyText(text) {
     var ta = document.createElement("textarea");
@@ -3435,6 +3969,7 @@ function settingsHtml(message = "") {
       input.value = j.apiKey;
       var quickApiKey = document.getElementById("apiKey");
       if (quickApiKey) quickApiKey.textContent = j.apiKey;
+      updateRssBuilderUrl();
 
       var ok = await copyText(j.apiKey);
 
@@ -3770,6 +4305,7 @@ module.exports = {
   xmlEscape,
   torznabCapsXml,
   torznabResultsXml,
+  extractBrowseFilters,
   extractSearchInputs,
   buildSearchQuery,
   buildBrowsePath,

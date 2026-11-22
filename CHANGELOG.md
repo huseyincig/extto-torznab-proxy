@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.7 — 2026-11-22
+
+- **Torznab EXT Filtering & Sorting Options for qBittorrent RSS & Custom Clients (`server.js`)**: Added `extractBrowseFilters()` and extended `buildBrowsePath()`, `fetchBrowse()`, and `handleApi()` to forward validated EXT `/browse/` filter and sort parameters directly from `/api` requests without requiring a search keyword `q` (closes #5):
+  - `user_nick` (alias: `uploader`): Filter torrents by EXT uploader nickname (e.g. `PSA`, `QxR`, `MeGusta`).
+  - `sort`: Sort results by `age` (aliases: `created`, `date`, `time`), `seed` (aliases: `seeds`, `seeders`), `leech` (aliases: `leechs`, `leechers`, `peers`), `size`, `files`, or `comments`.
+  - `order`: Sort direction (`desc` or `asc`; defaults to `desc` when `sort` is specified).
+  - `age`: Upload time window (`0` = Last 24 Hours, `1` = Last 3 Days, `2` = Last Week, `3` = Last 2 Weeks, `4` = Last Month).
+  - `ext_cat` (alias: `site_cat`, or `cat` when `1..10`): Native EXT site category ID (`1` = Movies, `2` = TV, `3` = Music, `4` = Games, `5` = Applications, `6` = Books, `7` = Anime, `8` = Other, `10` = XXX), while preserving standard Torznab `cat` filtering (`2000`, `5000`, `5070`).
+  - `sub_cat`: Native EXT subcategory ID (`1..999`).
+  - `page`: Upstream `/browse/` page number (`1..100`).
+  - `with_adult`: Per-request adult content override (`0`/`1` or `false`/`true`) without altering the global Prowlarr/Sonarr/Radarr setting.
+- **Keyword-Optional Browse Mode (`server.js`)**: When any filter or sort parameter (`filters.hasFilters`) is present on `/api?t=search`, `extractSearchInputs()` and `buildBrowsePath()` no longer inject the fallback `q=warm` term when `q` is empty, allowing qBittorrent RSS feeds to track an uploader's or category's latest uploads cleanly.
+- **Interactive Web UI RSS & Filtered Feed URL Builder (`server.js`)**: Added an interactive **"RSS & Filtered Feed URL Builder (qBittorrent / RSS)"** card to the Web UI (`settingsHtml()`) localized across all 8 supported languages (`en`, `tr`, `es`, `ru`, `pt`, `fr`, `de`, `pl` — 117 keys per language) with live URL generation, one-click clipboard copy, and direct XML feed preview.
+- **Acknowledgments**: Special thanks to [@blowfish602](https://github.com/blowfish602) for proposing custom EXT filtering and sorting parameters for qBittorrent RSS feeds in [#5](https://github.com/huseyincig/extto-torznab-proxy/issues/5).
+- **Verification**: 39/39 unit & regression tests passing (`npm test`), including inline Web UI `<script>` compilation verification via `vm.Script`.
+
 ## 1.0.6 — 2026-11-21
 
 - **Auto-Detected 8-Language Multilingual Web UI (`server.js`)**: Expanded automatic browser language detection (`navigator.languages` / `navigator.language`, `SUPPORTED_UI_LANGS`, `UI_I18N`, `resolveUiLang()`) to support **English (`en`)**, **Turkish (`tr`)**, **Spanish (`es`)**, **Russian (`ru`)**, **Portuguese (`pt`)**, **French (`fr`)**, **German (`de`)**, and **Polish (`pl`)** with 100% key parity across all 82 UI strings.

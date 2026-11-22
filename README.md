@@ -5,15 +5,15 @@
 [![Prowlarr: v3.0.2.5780 Verified](https://img.shields.io/badge/Prowlarr-v3.0.2.5780%20verified-10b981?logo=checkmarx&logoColor=white)](#-verification--live-arr-stack-acceptance)
 [![Sonarr: v4.0.20.3014 Verified](https://img.shields.io/badge/Sonarr-v4.0.20.3014%20verified-10b981?logo=sonarr&logoColor=white)](#-verification--live-arr-stack-acceptance)
 [![Radarr: v7.0.3.10918 Verified](https://img.shields.io/badge/Radarr-v7.0.3.10918%20verified-10b981?logo=radarr&logoColor=white)](#-verification--live-arr-stack-acceptance)
-[![Tests: 37/37 Passing](https://img.shields.io/badge/Tests-37%2F37%20Passing-339933?logo=githubactions&logoColor=white)](test/server.test.js)
+[![Tests: 39/39 Passing](https://img.shields.io/badge/Tests-39%2F39%20Passing-339933?logo=githubactions&logoColor=white)](test/server.test.js)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [Verification & Compatibility](#-verification--live-arr-stack-acceptance) · [Key Highlights](#-key-highlights) · [Deployment (Docker Compose)](#-deployment-docker-compose) · [Prowlarr, Sonarr & Radarr Setup](#-prowlarr-sonarr--radarr-setup) · [Architecture & Search Lifecycle](#-architecture--hybrid-imdb-search-lifecycle) · [Web UI & Configuration](#️-web-ui--configuration) · [HTTP & Torznab Endpoints](#-http--torznab-endpoints) · [Validation & Testing](#-validation--testing)
 
-A high-performance, zero-dependency, self-hosted **Generic Torznab** gateway for EXT-style torrent search pages (`extranet.torrentbay.st`, `ext.to`), purpose-built for the **\*arr stack** (**Prowlarr**, **Sonarr**, and **Radarr**).
+A high-performance, zero-dependency, self-hosted **Generic Torznab** gateway for EXT-style torrent search pages (`extranet.torrentbay.st`, `ext.to`), purpose-built for the **\*arr stack** (**Prowlarr**, **Sonarr**, and **Radarr**) and **qBittorrent RSS** automation.
 
-**EXT Torznab Proxy** manages persistent **FlareSolverr** (or compatible endpoints such as **Byparr**) sessions and Cloudflare warm cycles internally, translates \*arr queries (including hybrid **IMDb ID + title resolution**, **Full Season Packs**, **Daily Series**, and **Anime**), resolves magnets on-demand at download time, and exposes a native Generic Torznab feed—requiring **zero custom Prowlarr YAML definition files**.
+**EXT Torznab Proxy** manages persistent **FlareSolverr** (or compatible endpoints such as **Byparr**) sessions and Cloudflare warm cycles internally, translates \*arr queries (including hybrid **IMDb ID + title resolution**, **Full Season Packs**, **Daily Series**, and **Anime**), supports native EXT **uploader, category, age, and sort filtering** for custom RSS feeds, resolves magnets on-demand at download time, and exposes a native Generic Torznab feed—requiring **zero custom Prowlarr YAML definition files**.
 
 ---
 
@@ -21,9 +21,9 @@ A high-performance, zero-dependency, self-hosted **Generic Torznab** gateway for
 
 ![Verification and live *arr stack acceptance results](docs/assets/verification-overview.svg)
 
-> EXT Torznab Proxy **v1.0.6** was verified on **21 November 2026** against a live **\*arr stack** (**Prowlarr `v3.0.2.5780`**, **Sonarr `v4.0.20.3014`**, and **Radarr `v7.0.3.10918`**) running on **Node.js `22+`**.
+> EXT Torznab Proxy **v1.0.7** was verified on **22 November 2026** against a live **\*arr stack** (**Prowlarr `v3.0.2.5780`**, **Sonarr `v4.0.20.3014`**, and **Radarr `v7.0.3.10918`**) running on **Node.js `22+`**.
 
-- **Automated Unit & Regression Suite:** **37 / 37** tests passing (`npm test`), covering Torznab `<caps>`, hybrid IMDb + title search merging, Prowlarr `{ImdbId:...}` & `q=tt...` extraction, unsupported external ID (`tmdbid`/`tvdbid`) protection, unclassified (`7000`) category resolution, pagination (`offset`/`limit`), season-to-episode token upgrading, daily series formatting (`YYYY.MM.DD`), audio/codec dot preservation (`DDP5.1`, `7.1`, `H.264`, `H.265`), 8-language Web UI parity, RFC 7230 magnet `Location` header normalization, HTML entity/date/size edge cases, and FlareSolverr error diagnostics.
+- **Automated Unit & Regression Suite:** **39 / 39** tests passing (`npm test`), covering Torznab `<caps>`, hybrid IMDb + title search merging, Prowlarr `{ImdbId:...}` & `q=tt...` extraction, unsupported external ID (`tmdbid`/`tvdbid`) protection, EXT `/browse/` filter & sort forwarding (`user_nick`, `sort`, `order`, `age`, `ext_cat`, `sub_cat`, `page`, `with_adult`), unclassified (`7000`) category resolution, pagination (`offset`/`limit`), season-to-episode token upgrading, daily series formatting (`YYYY.MM.DD`), audio/codec dot preservation (`DDP5.1`, `7.1`, `H.264`, `H.265`), 8-language Web UI parity & `<script>` VM compilation, RFC 7230 magnet `Location` header normalization, HTML entity/date/size edge cases, and FlareSolverr error diagnostics.
 - **Live Prowlarr, Sonarr & Radarr Acceptance:** End-to-end indexer synchronization, interactive season/episode searches, full season pack matching (`S01` and `"Season 1 Complete"`), and multi-quality movie searches verified against live Prowlarr, Sonarr, and Radarr instances.
 - **Zero External Runtime Dependencies:** Built strictly on the Node.js `>=22` standard library (`http`, `crypto`, `fs`, native `fetch`) and packaged as a lightweight multi-arch (`linux/amd64`, `linux/arm64`) Alpine Docker image.
 
@@ -36,7 +36,7 @@ A high-performance, zero-dependency, self-hosted **Generic Torznab** gateway for
 | **Radarr** | `v7.0.3.10918` | `.NET 10.0.15` | `t=movie&imdbid=tt...` hybrid IMDb + resolved `"Title Year"` search merging, year-disambiguated release matching, and multi-quality codec/audio tag parsing (`2160p REMUX`, `TrueHD 7.1`, `DDP5.1`, `H.264`, `H.265`). |
 | **FlareSolverr / Byparr** | `v3.3.21+` / `latest` | Chromium / Python | Persistent session (`sessions.create`), mutex-serialized request queue (`withFsLock`), automatic session recreation on expiry, background Cloudflare warm timer, and configurable `FLARESOLVERR_URL`. |
 
-See the [1.0.6 release notes](CHANGELOG.md) for 8-language Web UI localization, Prowlarr `{ImdbId:...}` token extraction, Docker environment variable overrides, and parser hardening.
+See the [1.0.7 release notes](CHANGELOG.md) for custom EXT filtering & sorting options (`user_nick`, `sort`, `order`, `age`, `ext_cat`), the interactive Web UI RSS Feed URL Builder, 8-language Web UI localization, and hybrid IMDb search.
 
 ---
 
@@ -56,7 +56,8 @@ See the [1.0.6 release notes](CHANGELOG.md) for 8-language Web UI localization, 
 - **Codec, Audio Channel & Date Dot Preservation:** Preserves release-critical dots in audio channel tags (`5.1`, `7.1`, `2.0`, `DDP5.1`, `AAC2.0`, `DD+5.1`), video codecs (`H.264`, `H.265`), and daily dates (`YYYY.MM.DD`) during title normalization so Sonarr/Radarr custom formats and quality profiles score releases accurately.
 - **On-Demand Magnet Resolution & RFC 7230 Header Safety:** Search queries only parse the lightweight `/browse/` HTML table. Detail-page token extraction (`pageToken`, `csrfToken`, HMAC-SHA256) and `/ajax/getTorrentMagnet.php` resolution execute **only** when a release is actually grabbed (`/download`), returning an RFC 7230-compliant `302 Location: magnet:?...` redirect sanitized by `normalizeMagnet()`.
 - **Mutex-Serialized FlareSolverr Session & Auto-Warmer:** Queues concurrent FlareSolverr calls behind an internal lock (`withFsLock`) to prevent Chromium tab stampedes during multi-season searches, while a configurable background warm timer keeps the Cloudflare clearance cookie (`cf_clearance`) hot.
-- **Auto-Detected Multilingual Web UI (8 Languages):** Built-in responsive dashboard at `http://YOUR_HOST_IP:8998/` automatically adapts to your browser's language (`navigator.languages` / `navigator.language`: **English (`en`)**, **Turkish (`tr`)**, **Spanish (`es`)**, **Russian (`ru`)**, **Portuguese (`pt`)**, **French (`fr`)**, **German (`de`)**, and **Polish (`pl`)**) with live warm telemetry, one-click API key copy/regeneration, cache clearing, session reset, and instant settings persistence.
+- **Native EXT Filtering, Sorting & Interactive RSS Feed URL Builder:** Supports custom `/api?t=search` filter and sort parameters (`user_nick` / `uploader`, `sort`, `order`, `age`, `ext_cat` / `site_cat`, `sub_cat`, `page`, `with_adult`) without requiring a search keyword `q`, plus an interactive **"RSS & Filtered Feed URL Builder (qBittorrent / RSS)"** card in the Web UI with live URL generation, one-click clipboard copy, and direct XML preview.
+- **Auto-Detected Multilingual Web UI (8 Languages):** Built-in responsive dashboard at `http://YOUR_HOST_IP:8998/` automatically adapts to your browser's language (`navigator.languages` / `navigator.language`: **English (`en`)**, **Turkish (`tr`)**, **Spanish (`es`)**, **Russian (`ru`)**, **Portuguese (`pt`)**, **French (`fr`)**, **German (`de`)**, and **Polish (`pl`)**) with live warm telemetry, one-click API key copy/regeneration, RSS Feed URL Builder, cache clearing, session reset, and instant settings persistence.
 
 ---
 
@@ -111,7 +112,7 @@ docker compose up -d
 For a pinned release version, use:
 
 ```yaml
-image: ghcr.io/huseyincig/extto-torznab-proxy:1.0.6
+image: ghcr.io/huseyincig/extto-torznab-proxy:1.0.7
 ```
 
 ### 🌐 Optional Container Environment Variables
@@ -274,10 +275,31 @@ The Web UI automatically detects your browser's language (**English**, **Turkish
 | `/cache/clear` | `GET` / `POST` | Clears in-memory search HTML, resolved magnet, and IMDb title LRU caches |
 | `/session/reset` | `GET` / `POST` | Destroys and recreates the persistent FlareSolverr session |
 | `/api?t=caps` | `GET` | Torznab capabilities XML (`limits`, `searching`, `categories`) |
-| `/api?t=search&q=...` | `GET` | General Torznab search (`q`, `{ImdbId:...}`, `cat`, `offset`, `limit`, `apikey`) |
+| `/api?t=search&...` | `GET` | General Torznab search & filtered RSS feed (`q`, `{ImdbId:...}`, `user_nick`, `sort`, `order`, `age`, `ext_cat`, `sub_cat`, `page`, `with_adult`, `cat`, `offset`, `limit`, `apikey`) |
 | `/api?t=tvsearch&...` | `GET` | Torznab TV search (`q`, `season`, `ep`, `imdbid`, `cat`, `offset`, `limit`, `apikey`) |
 | `/api?t=movie&...` | `GET` | Torznab Movie search (`q`, `imdbid`, `cat`, `offset`, `limit`, `apikey`) |
 | `/download?id=...&path=...` | `GET` | Resolves the torrent's magnet URI on-demand and returns an `HTTP 302` redirect |
+
+### 📡 Custom RSS & EXT Filtering / Sorting Parameters (`qBittorrent / RSS`)
+
+In addition to standard \*arr queries, `/api?t=search` supports native EXT `/browse/` filtering and sorting parameters for **qBittorrent RSS** feeds and external Torznab clients. When any filter or sort parameter below is supplied, `q` is optional (the proxy will **not** inject `q=warm`). You can also build and preview these URLs visually from the **"RSS & Filtered Feed URL Builder (qBittorrent / RSS)"** card in the Web UI:
+
+| Query Parameter | Accepted Values | Description |
+| :--- | :--- | :--- |
+| `user_nick` *(or `uploader`)* | `PSA`, `QxR`, `MeGusta`, ... | Filter uploads by EXT uploader nickname (`1`–`64` characters). |
+| `sort` | `age`, `seed`, `leech`, `size`, `files`, `comments` | Sort upstream results (also accepts aliases: `created`/`date`/`time` $\rightarrow$ `age`, `seeds`/`seeders` $\rightarrow$ `seed`, `leechs`/`leechers`/`peers` $\rightarrow$ `leech`). |
+| `order` | `desc`, `asc` | Sort direction (defaults to `desc` when `sort` is set). |
+| `age` | `0`, `1`, `2`, `3`, `4` | Upload time range (`0` = 24h, `1` = 3 days, `2` = 1 week, `3` = 2 weeks, `4` = 1 month). |
+| `ext_cat` *(or `site_cat`)* | `1`–`8`, `10` | Native EXT category ID (`1` = Movies, `2` = TV, `3` = Music, `4` = Games, `5` = Applications, `6` = Books, `7` = Anime, `8` = Other, `10` = XXX). Also accepted via `cat=1..10`. |
+| `sub_cat` | `1`–`999` | Native EXT subcategory ID (e.g. `3` = Dual Audio, `53` = 4K/UHD, `65` = 3D). |
+| `page` | `1`–`100` | Upstream `/browse/` page number. |
+| `with_adult` | `0`, `1`, `false`, `true` | Per-request adult content override without altering global settings. |
+
+Example qBittorrent RSS feed URL (latest Movie uploads from uploader `PSA`, sorted by seeders descending):
+
+```text
+http://YOUR_HOST_IP:8998/api?t=search&apikey=YOUR_API_KEY&user_nick=PSA&ext_cat=1&sort=seed&order=desc
+```
 
 ---
 
@@ -301,14 +323,14 @@ This repository includes GitHub Actions workflows (`.github/workflows/docker-ima
 
 ```text
 ghcr.io/huseyincig/extto-torznab-proxy:latest
-ghcr.io/huseyincig/extto-torznab-proxy:1.0.6
+ghcr.io/huseyincig/extto-torznab-proxy:1.0.7
 ```
 
 Push a version tag to trigger a release build:
 
 ```bash
-git tag v1.0.6
-git push origin v1.0.6
+git tag v1.0.7
+git push origin v1.0.7
 ```
 
 ---

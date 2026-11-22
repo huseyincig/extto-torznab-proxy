@@ -1,7 +1,7 @@
 {
   "name": "extto-torznab-proxy",
-  "version": "1.0.6",
-  "description": "Self-hosted Generic Torznab gateway for EXT.to / Extranet Torrentbay — built for Prowlarr, Sonarr & Radarr with hybrid IMDb + title search, FlareSolverr session warming, LRU caching, and multilingual Web UI",
+  "version": "1.0.7",
+  "description": "Self-hosted Generic Torznab gateway for EXT.to / Extranet Torrentbay — built for Prowlarr, Sonarr, Radarr & qBittorrent RSS with hybrid IMDb + title search, uploader/category/sort filtering, FlareSolverr session warming, LRU caching, and 8-language Web UI",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

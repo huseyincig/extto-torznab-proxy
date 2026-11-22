@@ -4,8 +4,8 @@ const http = require("node:http");
 
 const srv = require("../server.js");
 
-test("APP_VERSION is 1.0.6", () => {
-  assert.equal(srv.APP_VERSION, "1.0.6");
+test("APP_VERSION is 1.0.7", () => {
+  assert.equal(srv.APP_VERSION, "1.0.7");
 });
 
 test("parseDateToRfc822: parses relative ages accurately instead of current time or year 2001", () => {
@@ -567,6 +567,73 @@ test("/api and /cache/clear: returns empty feed on unsupported ID-only queries (
     srv.setConfigForTest({ apiKey: prevKey, enableImdbSearch: prevImdb });
   }
 });
+
+test("extractBrowseFilters and buildBrowsePath: supports user_nick, sort, order, age, ext_cat, sub_cat, page, and with_adult without requiring q", () => {
+  // 1. Keywordless uploader + sort + order query (Issue #5 example)
+  const p1 = new URLSearchParams("t=search&user_nick=PSA&sort=age&order=desc");
+  const in1 = srv.extractSearchInputs(p1);
+  assert.equal(in1.q, "");
+  assert.equal(in1.filters.userNick, "PSA");
+  assert.equal(in1.filters.sort, "age");
+  assert.equal(in1.filters.order, "desc");
+  assert.equal(
+    srv.buildBrowsePath(in1.q, in1.imdbId, in1.filters),
+    "/browse/?user_nick=PSA&sort=age&order=desc&with_adult=1"
+  );
+
+  // 2. Sort aliases (seeders -> seed) + age + ext_cat + sub_cat + page + with_adult override
+  const p2 = new URLSearchParams("t=search&uploader=QxR&sort=seeders&order=asc&age=0&ext_cat=2&sub_cat=72&page=2&with_adult=0");
+  const in2 = srv.extractSearchInputs(p2);
+  assert.equal(in2.q, "");
+  assert.equal(
+    srv.buildBrowsePath(in2.q, in2.imdbId, in2.filters),
+    "/browse/?user_nick=QxR&cat=2&sub_cat=72&age=0&sort=seed&order=asc&page=2&with_adult=0"
+  );
+
+  // 3. Combined keyword + uploader + sort
+  const p3 = new URLSearchParams("t=tvsearch&q=Breaking+Bad&season=1&user_nick=MeGusta&sort=size&order=desc");
+  const in3 = srv.extractSearchInputs(p3);
+  assert.equal(in3.q, "Breaking Bad S01");
+  assert.equal(
+    srv.buildBrowsePath(in3.q, in3.imdbId, in3.filters),
+    "/browse/?q=Breaking+Bad+S01&user_nick=MeGusta&sort=size&order=desc&with_adult=1"
+  );
+
+  // 4. Invalid filter values are ignored and empty query falls back to warm
+  const p4 = new URLSearchParams("t=search&sort=invalid_field&order=sideways&age=99&page=0");
+  const in4 = srv.extractSearchInputs(p4);
+  assert.equal(in4.filters.hasFilters, false);
+  assert.equal(in4.q, "warm");
+  assert.equal(
+    srv.buildBrowsePath(in4.q, in4.imdbId, in4.filters),
+    "/browse/?q=warm&with_adult=1"
+  );
+});
+
+test("GET / Web UI: inline <script> parses cleanly without syntax errors and contains RSS URL builder before sticky actions", async () => {
+  const vm = require("node:vm");
+  const server = srv.server;
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+
+    const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/i);
+    assert.ok(scriptMatch, "Expected inline <script> in Web UI HTML");
+    assert.doesNotThrow(() => new vm.Script(scriptMatch[1]), "Inline Web UI script must not have syntax errors");
+
+    const rssIdx = html.indexOf('id="rssFeedUrl"');
+    const actionsIdx = html.indexOf('class="actions"');
+    assert.ok(rssIdx > 0 && actionsIdx > rssIdx, "RSS builder section must appear above sticky .actions bar");
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+
 
 
 
