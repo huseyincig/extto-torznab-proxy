@@ -5,3 +5,7 @@ node_modules/
 tmp/
 .DS_Store
 Thumbs.db
+# Local Antigravity/agent instructions and project memory.
+GEMINI.md
+AGENTS.md
+.gemini/

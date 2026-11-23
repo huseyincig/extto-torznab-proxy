@@ -319,7 +319,7 @@ docker build -t extto-torznab-proxy:latest .
 
 ### Publishing Multi-Arch Images (GHCR)
 
-This repository includes GitHub Actions workflows (`.github/workflows/docker-image.yml` and `.github/workflows/docker-publish.yml`) that run the unit test suite and publish multi-architecture (`linux/amd64`, `linux/arm64`) images to GitHub Container Registry:
+This repository includes GitHub Actions workflows (`.github/workflows/ci.yml` and `.github/workflows/docker-publish.yml`) that run the unit test suite and publish multi-architecture (`linux/amd64`, `linux/arm64`) images to GitHub Container Registry:
 
 ```text
 ghcr.io/huseyincig/extto-torznab-proxy:latest
